@@ -39,6 +39,39 @@ npm run build
 
 Biến tùy chọn: `HOST` (mặc định `127.0.0.1`), `PORT` (mặc định `3000`), `VINCENT_DATA_DIR` (thư mục chứa SQLite). Khi thực sự chạy sau HTTPS/reverse proxy, cần xác minh `NODE_ENV=production` hoặc `COOKIE_SECURE=1` để bật `Secure` cho cookie phiên. Tài khoản admin chỉ được tạo lúc database chưa có user; không tự đặt lại mật khẩu của admin hiện hữu.
 
+## Kiểm tra tài khoản và khôi phục mật khẩu SUPER_ADMIN
+
+Đổi email đăng nhập hoặc đặt lại mật khẩu chỉ có tác dụng trên **database hiện có**. Công cụ không tạo database hoặc tài khoản mới, không đổi vai trò và không động đến các bảng phòng, hóa đơn hay thanh toán. **Đổi `ADMIN_EMAIL` hoặc `ADMIN_PASSWORD` trong `.env` / Render không cập nhật tài khoản đã tạo.** Không thể đọc lại mật khẩu gốc từ `password_hash`.
+
+1. Xác định đúng thư mục dữ liệu của instance cần khôi phục. Trên máy dùng `data/` (hoặc `VINCENT_DATA_DIR` đang cấu hình). Trên Render Blueprint, thư mục dữ liệu là `/var/data` trên persistent disk. Nếu chưa xác minh đúng nơi chứa `vincent.sqlite`, **không tiến hành khôi phục**.
+2. Kiểm tra người dùng (chỉ đọc ID/email/quyền; không đọc mật khẩu hoặc hash):
+
+   ```powershell
+   npm run admin:list
+   ```
+
+3. Chọn chính xác ID hoặc tên đăng nhập **hiện tại** của tài khoản `SUPER_ADMIN` từ kết quả, rồi dùng terminal riêng tư:
+
+   ```powershell
+   npm run admin:reset -- --email admin@example.com
+   ```
+
+   **Đặc biệt cho Render đã xác minh có `id=1`, `email=Admin`, `role=SUPER_ADMIN`:** Trường đăng nhập của trang web yêu cầu địa chỉ email hợp lệ nên cần thay cả email lẫn mật khẩu trong cùng một lần:
+
+   ```bash
+   npm run admin:reset -- --id 1 --new-email admin@your-domain.example
+   ```
+
+   Thay `admin@your-domain.example` bằng **địa chỉ email hợp lệ do bạn kiểm soát**; đây chỉ là ví dụ. Có thể dùng `--email Admin` thay cho `--id 1`. Không được nhập `--email` và `--id` cùng nhau. Chỉ dùng `--new-email` khi thực sự cần đổi tên đăng nhập; nếu không khai báo, tên đăng nhập hiện tại được giữ nguyên. Email mới không được trùng với tài khoản đã tồn tại (không phân biệt hoa/thường).
+
+   Nhập mật khẩu mới **hai lần**, được ẩn khi gõ và dài ít nhất 12 ký tự. Không ghi mật khẩu vào lệnh, file nguồn, `.env` hoặc lịch sử terminal. Công cụ kiểm tra database trước, tạo bản sao SQLite có xác minh tại `data/backups/` (hoặc `$env:VINCENT_DATA_DIR/backups/`), rồi mới cập nhật email và hash của đúng Admin. Công cụ đồng thời thu hồi mọi session của Admin đó và thêm sự kiện `ADMIN_PASSWORD_RESET` vào `audit_logs` (ghi lại email trước/sau nếu có đổi, không ghi mật khẩu), trong **cùng một transaction**. Khi thất bại, thao tác bị `ROLLBACK` và bản backup được giữ lại.
+
+4. Dùng tài khoản vừa đặt lại đăng nhập. Kiểm tra tòa, phòng, hóa đơn, các khoản đã thu và Audit Log. Sao chép bản backup đã xác minh sang kho lưu trữ riêng được bảo vệ; backup chỉ nằm trên persistent disk **chưa** phải backup ngoài Render. Có thể thử phục hồi sang thư mục **mới, trống** với `npm run restore -- <backup.sqlite> <new-directory>`.
+
+Trên **Render**, sử dụng Shell của đúng service có kết nối persistent disk `/var/data` và mã nguồn mới đã được triển khai. Chạy `npm run admin:list` để xác minh tài khoản trước khi dùng `npm run admin:reset -- --id <id-hiện-tại> --new-email <email-hợp-lệ>`. Nếu Render báo không có script `admin:list` hoặc `admin:reset`, phiên bản deploy **chưa chứa công cụ này**, cần triển khai mã nguồn đã kiểm thử trước. Nếu không truy cập được Shell/persistent disk hoặc đường dẫn cơ sở dữ liệu chưa được xác minh, dừng ở bước kiểm tra, không khởi tạo lại ứng dụng với thư mục trống. Hệ thống đang chạy có thể tiếp tục nhận giao dịch; nên thực hiện trong cửa sổ bảo trì ngắn để bản backup và số lượng bản ghi đối chiếu không thay đổi giữa các bước.
+
+Nếu không có terminal nhập mật khẩu được, công cụ hỗ trợ `--password-stdin`: truyền **đúng hai dòng** (mật khẩu mới và xác nhận) từ một luồng stdin bí mật. Không dùng `echo` hoặc lệnh chứa mật khẩu vì sẽ lưu dấu trong lịch sử shell và có thể lộ trên nhật ký. Không tự chạy chức năng reset trên database production trong CI/test.
+
 ## Luồng sử dụng
 
 Tạo tòa nhà → chọn tòa → tạo phòng → chọn tháng → tạo hóa đơn nhập điện nước → ghi nhận thanh toán → xem công nợ trên Dashboard. Có thể sửa chỉ số điện hóa đơn bằng thao tác “Sửa” có lý do; phiên bản cũ được giữ lại. Các khoản thanh toán không bị thay đổi khi sửa hóa đơn.
