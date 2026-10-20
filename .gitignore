@@ -1,0 +1,15 @@
+node_modules/
+data/
+.artifacts/
+.env
+*.log
+.env.*
+!.env.example
+.codex-remote-attachments/
+.DS_Store
+.coverage/
+coverage/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
