@@ -2,6 +2,8 @@
 
 ## Triển khai Render từ GitHub
 
+[**Mở Render để tạo dịch vụ VINCENT ART từ GitHub**](https://render.com/deploy?repo=https://github.com/hoangdung36official-create/VincentArtTaichinh)
+
 Repository chứa `render.yaml` cho dịch vụ Node.js tại Singapore. Blueprint sử dụng **gói Starter có tính phí** và **Persistent Disk 1 GB** gắn tại `/var/data`, nơi SQLite lưu dữ liệu. Không chọn gói Free hoặc bỏ disk: khi máy chủ được thay thế dữ liệu tài chính có thể bị mất. Chỉ chạy **một instance** dùng SQLite; chưa hỗ trợ nhiều instance ghi đồng thời hoặc đồng bộ đa vùng.
 
 1. Mở Render Dashboard → **New → Blueprint**, kết nối GitHub và chọn repository `VincentArtTaichinh` (nhánh `main`). Kiểm tra chi phí trước khi xác nhận tạo dịch vụ.
@@ -11,6 +13,7 @@ Repository chứa `render.yaml` cho dịch vụ Node.js tại Singapore. Bluepri
 5. Cấu hình sao lưu database từ persistent disk sang nơi lưu trữ bên ngoài Render theo lịch, kiểm thử khả năng phục hồi và phân quyền tài khoản trước khi sử dụng với dữ liệu vận hành. Bộ công cụ `npm run backup` và `npm run restore` được cung cấp để thực hiện sao lưu/phục hồi có kiểm soát; không khôi phục đè database đang hoạt động.
 
 Render build dùng `npm run check` để kiểm tra cú pháp trên máy chủ. Chạy `npm run build` tại môi trường phát triển/CI để chạy đầy đủ bộ kiểm thử trước khi đưa phiên bản mới lên production. Cấu hình deploy sẵn sàng để tạo **dịch vụ thử nghiệm**; độ sẵn sàng production còn phụ thuộc kiểm thử trên Render và phương án sao lưu/khôi phục dữ liệu thực tế.
+`autoDeployTrigger: off` ngăn tự triển khai phiên bản mới khi push GitHub; dùng Render Dashboard để triển khai thủ công sau kiểm thử.
 
 Ứng dụng nội bộ đang phát triển cho quản lý tòa nhà, phòng, kỳ thu, hóa đơn, thanh toán và công nợ. Dùng SQLite thật (`data/vincent.sqlite` mặc định, hoặc thư mục `VINCENT_DATA_DIR`), không tự tạo dữ liệu mẫu. **Chưa được xác minh đủ điều kiện triển khai production.**
 

@@ -6,6 +6,7 @@ services:
     runtime: node
     region: singapore
     plan: starter
+    autoDeployTrigger: off
     buildCommand: npm run check
     startCommand: npm start
     healthCheckPath: /healthz
