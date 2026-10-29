@@ -156,7 +156,12 @@ export function migrateSchema(db) {
     { name: 'parking_rate', sql: 'ALTER TABLE rooms ADD COLUMN parking_rate INTEGER NOT NULL DEFAULT 100000 CHECK(parking_rate>=0)' },
     { name: 'ev_charging_enabled', sql: 'ALTER TABLE rooms ADD COLUMN ev_charging_enabled INTEGER NOT NULL DEFAULT 0' },
     { name: 'ev_charging_count', sql: 'ALTER TABLE rooms ADD COLUMN ev_charging_count INTEGER NOT NULL DEFAULT 0 CHECK(ev_charging_count>=0)' },
-    { name: 'ev_charging_rate', sql: 'ALTER TABLE rooms ADD COLUMN ev_charging_rate INTEGER NOT NULL DEFAULT 100000 CHECK(ev_charging_rate>=0)' }
+    { name: 'ev_charging_rate', sql: 'ALTER TABLE rooms ADD COLUMN ev_charging_rate INTEGER NOT NULL DEFAULT 100000 CHECK(ev_charging_rate>=0)' },
+    { name: 'previous_electric', sql: 'ALTER TABLE rooms ADD COLUMN previous_electric INTEGER DEFAULT NULL' },
+    { name: 'current_electric', sql: 'ALTER TABLE rooms ADD COLUMN current_electric INTEGER DEFAULT NULL' },
+    { name: 'previous_water', sql: 'ALTER TABLE rooms ADD COLUMN previous_water INTEGER DEFAULT NULL' },
+    { name: 'current_water', sql: 'ALTER TABLE rooms ADD COLUMN current_water INTEGER DEFAULT NULL' },
+    { name: 'extras', sql: 'ALTER TABLE rooms ADD COLUMN extras INTEGER NOT NULL DEFAULT 0' }
   ];
   for (const col of roomColsToAdd) {
     if (!roomColumns.has(col.name)) {

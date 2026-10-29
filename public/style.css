@@ -100,4 +100,39 @@ button.danger:hover{background:#fee2e2;color:#b91c1c}
 .ai-config-drawer{background:#f9f9f9;border-bottom:1px solid #e5e5e5;padding:12px 16px;font-size:12px}
 .ai-config-drawer input{width:100%;padding:6px 8px;font-size:12px;border:1px solid #ccc;border-radius:5px;margin-top:3px;box-sizing:border-box}
 
+/* Spreadsheet Grid View for Rooms */
+.spreadsheet-panel{padding:18px 20px}
+.spreadsheet-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%;border:1px solid #e2e8f0;border-radius:8px;background:#fff;margin-top:12px;box-shadow:0 1px 3px rgba(0,0,0,0.04)}
+.spreadsheet-table{min-width:1800px;border-collapse:separate;border-spacing:0;width:100%;font-size:12px}
+.spreadsheet-table th,.spreadsheet-table td{padding:6px 8px;border-bottom:1px solid #eee;border-right:1px solid #f0f0f0;white-space:nowrap}
+.spreadsheet-table thead th{background:#f8fafc;font-size:11px;font-weight:650;color:#475569;border-bottom:1px solid #cbd5e1}
+.spreadsheet-table th.sticky-col,.spreadsheet-table td.sticky-col{position:sticky;left:0;z-index:5;background:#fff;border-right:2px solid #e2e8f0;min-width:110px}
+.spreadsheet-table thead th.sticky-col{z-index:12;background:#f8fafc}
+.spreadsheet-table .summary-header-row th{background:#f1f5f9;font-weight:700;font-size:11.5px;color:#0f172a;border-bottom:2px solid #94a3b8;padding:8px 6px}
+.spreadsheet-table .summary-header-row th.sticky-col{z-index:11;background:#e2e8f0}
+.sheet-cell{width:100%;box-sizing:border-box;min-width:70px;padding:5px 6px;border:1px solid transparent;border-radius:4px;background:transparent;font-size:12px;text-align:right;font-variant-numeric:tabular-nums;color:#1e293b;transition:border-color .15s,background .15s,box-shadow .15s}
+.sheet-cell:hover{border-color:#cbd5e1;background:#f8fafc}
+.sheet-cell:focus{border-color:#0f172a;background:#fff;outline:none;box-shadow:0 0 0 2px rgba(15,23,42,0.12)}
+.sheet-calc{background:#f8fafc;color:#334155;font-weight:550;text-align:right;padding:6px 8px;font-variant-numeric:tabular-nums}
+.cell-total{background:#f1f5f9;color:#0f172a;font-weight:700;font-size:12.5px}
+.sum-total{color:#0284c7;font-weight:800;font-size:12.5px}
+.sheet-save-badge{font-size:12px;display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border-radius:6px;background:#f8fafc;border:1px solid #e2e8f0;font-weight:550}
+.cell-saved{animation:flashSaved .7s ease-out}
+@keyframes flashSaved{0%{background-color:#dcfce7}100%{background-color:transparent}}
+
+.darkmode .spreadsheet-wrap{background:#1a1a1a;border-color:#333}
+.darkmode .spreadsheet-table th,.darkmode .spreadsheet-table td{border-bottom-color:#2a2a2a;border-right-color:#2a2a2a}
+.darkmode .spreadsheet-table th.sticky-col,.darkmode .spreadsheet-table td.sticky-col{background:#1a1a1a;border-right-color:#444}
+.darkmode .spreadsheet-table thead th{background:#222;border-bottom-color:#383838;color:#cbd5e1}
+.darkmode .spreadsheet-table thead th.sticky-col{background:#222}
+.darkmode .spreadsheet-table .summary-header-row th{background:#282828;border-bottom-color:#4a4a4a;color:#f8fafc}
+.darkmode .spreadsheet-table .summary-header-row th.sticky-col{background:#303030}
+.darkmode .sheet-cell{color:#f1f5f9}
+.darkmode .sheet-cell:hover{background:#262626;border-color:#444}
+.darkmode .sheet-cell:focus{background:#1e1e1e;border-color:#94a3b8;box-shadow:0 0 0 2px rgba(255,255,255,0.15)}
+.darkmode .sheet-calc{background:#222;color:#cbd5e1}
+.darkmode .cell-total{background:#2a2a2a;color:#fff}
+.darkmode .sheet-save-badge{background:#222;border-color:#333;color:#ddd}
+
+
 

@@ -793,6 +793,202 @@ async function handle(method,url,body,user){
   if(method==='POST'){if(user.role!=='SUPER_ADMIN')throw fail(403,'Admin only');const code=String(requireValue(body.code,'code')).trim().toUpperCase(),name=String(requireValue(body.name,'name')).trim();const inserted=run('INSERT INTO buildings(code,name,address,electric_rate,water_rate) VALUES(?,?,?,?,?)',code,name,body.address||'',safeInt(body.electricRate??3800,'electricRate'),safeInt(body.waterRate??0,'waterRate'));audit(user,'CREATE','building',Number(inserted.lastInsertRowid),null,{code,name});return {id:Number(inserted.lastInsertRowid)};}
  }
  if(parts[1]==='rooms'){
+  if(parts[2]==='sheet'&&method==='GET'){
+    const bid=Number(url.searchParams.get('buildingId'));
+    authorize(user,bid,false);
+    const month=url.searchParams.get('month');
+    if(!monthValid(month))throw fail(400,'Invalid billing month');
+    const period=one('SELECT * FROM periods WHERE building_id=? AND month=?',bid,month);
+    const isLocked=period?Boolean(period.locked):false;
+    const priorMonth=previousMonth(month);
+    const b=one('SELECT * FROM buildings WHERE id=?',bid);
+    const rooms=query('SELECT r.*, COALESCE(r.electric_rate,b.electric_rate) electric_rate_effective, COALESCE(r.water_rate,b.water_rate) water_rate_effective FROM rooms r JOIN buildings b ON b.id=r.building_id WHERE r.building_id=? ORDER BY r.code',bid);
+    
+    const sheetRows=rooms.map(r=>{
+      const inv=one('SELECT i.* FROM invoices i JOIN periods p ON p.id=i.period_id WHERE i.room_id=? AND p.month=?',r.id,month);
+      const priorInv=one('SELECT i.* FROM invoices i JOIN periods p ON p.id=i.period_id WHERE i.room_id=? AND p.month=?',r.id,priorMonth);
+      const priorInput=priorInv?JSON.parse(priorInv.input):null;
+      
+      if(inv){
+        const inp=JSON.parse(inv.input);
+        return {
+          id: r.id,
+          code: r.code,
+          tenant: r.tenant||'',
+          invoiceId: inv.id,
+          invoiceVersion: inv.version,
+          isLocked,
+          rent: inp.rent ?? r.rent,
+          occupants: inp.serviceCount ?? r.occupants ?? 1,
+          previousElectric: inp.previousElectric ?? priorInput?.currentElectric ?? r.previous_electric ?? 0,
+          currentElectric: inp.currentElectric ?? r.current_electric ?? null,
+          electricRate: inp.electricRate ?? r.electric_rate ?? r.electric_rate_effective ?? b?.electric_rate ?? 3800,
+          previousWater: inp.previousWater ?? priorInput?.currentWater ?? r.previous_water ?? 0,
+          currentWater: inp.currentWater ?? r.current_water ?? null,
+          waterRate: inp.waterRate ?? r.water_rate ?? r.water_rate_effective ?? b?.water_rate ?? 0,
+          internetRate: inp.internetRate ?? inp.internet ?? r.internet_rate ?? r.internet ?? 0,
+          serviceRate: inp.serviceRate ?? (inp.cleaning?Math.round(inp.cleaning/(inp.serviceCount||1)):r.service_rate||150000),
+          evChargingCount: inp.evChargingCount ?? r.ev_charging_count ?? 0,
+          evChargingRate: inp.evChargingRate ?? r.ev_charging_rate ?? 100000,
+          parkingCount: inp.parkingCount ?? (inp.parkingRate?Math.round((inp.parking||0)/inp.parkingRate):r.parking_count||0),
+          parkingRate: inp.parkingRate ?? r.parking_rate ?? 100000,
+          extras: inp.extras ?? r.extras ?? 0
+        };
+      } else {
+        return {
+          id: r.id,
+          code: r.code,
+          tenant: r.tenant||'',
+          invoiceId: null,
+          invoiceVersion: null,
+          isLocked,
+          rent: r.rent,
+          occupants: r.occupants ?? (r.service_count||1),
+          previousElectric: priorInput?.currentElectric ?? r.previous_electric ?? 0,
+          currentElectric: r.current_electric ?? null,
+          electricRate: r.electric_rate ?? r.electric_rate_effective ?? b?.electric_rate ?? 3800,
+          previousWater: priorInput?.currentWater ?? r.previous_water ?? 0,
+          currentWater: r.current_water ?? null,
+          waterRate: r.water_rate ?? r.water_rate_effective ?? b?.water_rate ?? 0,
+          internetRate: r.internet_rate ?? r.internet ?? 0,
+          serviceRate: r.service_rate ?? (r.cleaning?Math.round(r.cleaning/(r.occupants||1)):150000),
+          evChargingCount: r.ev_charging_count ?? 0,
+          evChargingRate: r.ev_charging_rate ?? 100000,
+          parkingCount: r.parking_count ?? (r.parking?1:0),
+          parkingRate: r.parking_rate ?? (r.parking||100000),
+          extras: r.extras ?? 0
+        };
+      }
+    });
+    return {buildingId:bid,month,locked:isLocked,rows:sheetRows};
+  }
+  if(parts[2]==='sheet'&&method==='POST'){
+    requireRole(user,['SUPER_ADMIN','MANAGER','ACCOUNTANT']);
+    const bid=Number(body.buildingId);
+    authorize(user,bid);
+    const month=String(body.month);
+    if(!monthValid(month))throw fail(400,'Invalid billing month');
+    
+    const rows=Array.isArray(body.rows)?body.rows:[body];
+    if(!rows.length)return {ok:true,saved:0};
+    
+    db.exec('BEGIN IMMEDIATE');try{
+      let period=one('SELECT * FROM periods WHERE building_id=? AND month=?',bid,month);
+      if(!period){
+        run('INSERT INTO periods(building_id,month) VALUES(?,?)',bid,month);
+        period=one('SELECT * FROM periods WHERE building_id=? AND month=?',bid,month);
+      }
+      if(period.locked)throw fail(409,'Period locked');
+      
+      const b=one('SELECT * FROM buildings WHERE id=?',bid);
+      
+      for(const row of rows){
+        const roomId=Number(row.id||row.roomId);
+        const room=one('SELECT * FROM rooms WHERE id=? AND building_id=?',roomId,bid);
+        if(!room)continue;
+        
+        const rent=safeInt(row.rent??room.rent,'rent');
+        const occupants=safeInt(row.occupants??room.occupants??1,'occupants');
+        const prevElec=row.previousElectric!=null&&row.previousElectric!==''?safeInt(row.previousElectric,'previousElectric'):null;
+        const currElec=row.currentElectric!=null&&row.currentElectric!==''?safeInt(row.currentElectric,'currentElectric'):null;
+        const elecRate=safeInt(row.electricRate??room.electric_rate??b?.electric_rate??3800,'electricRate');
+        const prevWater=row.previousWater!=null&&row.previousWater!==''?safeInt(row.previousWater,'previousWater'):null;
+        const currWater=row.currentWater!=null&&row.currentWater!==''?safeInt(row.currentWater,'currentWater'):null;
+        const waterRate=safeInt(row.waterRate??room.water_rate??b?.water_rate??0,'waterRate');
+        const netRate=safeInt(row.internetRate??room.internet_rate??0,'internetRate');
+        const srvRate=safeInt(row.serviceRate??room.service_rate??150000,'serviceRate');
+        const evCount=safeInt(row.evChargingCount??0,'evChargingCount');
+        const evRate=safeInt(row.evChargingRate??100000,'evChargingRate');
+        const pkCount=safeInt(row.parkingCount??0,'parkingCount');
+        const pkRate=safeInt(row.parkingRate??100000,'parkingRate');
+        const extras=safeInt(row.extras??0,'extras');
+        
+        // 1. Update rooms table
+        run(`UPDATE rooms SET 
+          rent=?, occupants=?, 
+          electric_rate=?, water_rate=?, 
+          internet_rate=?, internet=?, 
+          service_rate=?, service_count=?, cleaning=?, 
+          parking_rate=?, parking_count=?, parking=?, 
+          ev_charging_rate=?, ev_charging_count=?, 
+          previous_electric=?, current_electric=?, 
+          previous_water=?, current_water=?, 
+          extras=?
+          WHERE id=?`,
+          rent, occupants,
+          elecRate, waterRate,
+          netRate, netRate,
+          srvRate, occupants, (occupants*srvRate),
+          pkRate, pkCount, (pkCount*pkRate),
+          evRate, evCount,
+          prevElec, currElec,
+          prevWater, currWater,
+          extras,
+          roomId
+        );
+        
+        // 2. Sync invoice for that month
+        const invoiceInput={
+          rent,
+          electricEnabled: true,
+          previousElectric: prevElec,
+          currentElectric: currElec,
+          electricRate: elecRate,
+          waterEnabled: true,
+          previousWater: prevWater,
+          currentWater: currWater,
+          waterRate,
+          internetEnabled: netRate>0,
+          internetRate: netRate,
+          internet: netRate,
+          serviceEnabled: srvRate>0 && occupants>0,
+          serviceCount: occupants,
+          serviceRate: srvRate,
+          cleaning: occupants*srvRate,
+          parkingEnabled: pkCount>0,
+          parkingCount: pkCount,
+          parkingRate: pkRate,
+          parking: pkCount*pkRate,
+          evChargingEnabled: evCount>0,
+          evChargingCount: evCount,
+          evChargingRate: evRate,
+          extras,
+          discount: 0
+        };
+        
+        let total=0;
+        try {
+          total=calculateInvoice(invoiceInput);
+        } catch(e) {
+          const elAmt = (currElec!=null && prevElec!=null && currElec>=prevElec) ? (currElec-prevElec)*elecRate : 0;
+          const wtAmt = (currWater!=null && prevWater!=null && currWater>=prevWater) ? (currWater-prevWater)*waterRate : 0;
+          total = rent + elAmt + wtAmt + netRate + (occupants*srvRate) + (evCount*evRate) + (pkCount*pkRate) + extras;
+        }
+        
+        const existingInv=one('SELECT * FROM invoices WHERE period_id=? AND room_id=?',period.id,roomId);
+        if(existingInv){
+          const beforeInput=JSON.parse(existingInv.input);
+          if(JSON.stringify(beforeInput)!==JSON.stringify(invoiceInput)||existingInv.total!==total){
+            const nextVer=existingInv.version+1;
+            run('UPDATE invoices SET input=?, total=?, version=? WHERE id=?',JSON.stringify(invoiceInput),total,nextVer,existingInv.id);
+            run('INSERT INTO invoice_versions(invoice_id,version,input,total,reason,actor_id) VALUES(?,?,?,?,?,?)',existingInv.id,nextVer,JSON.stringify(invoiceInput),total,'Spreadsheet update',user.id);
+            audit(user,'REVISE','invoice',existingInv.id,{input:beforeInput,total:existingInv.total},{input:invoiceInput,total},'Spreadsheet edit');
+          }
+        } else {
+          const inserted=run('INSERT INTO invoices(period_id,room_id,input,total) VALUES(?,?,?,?)',period.id,roomId,JSON.stringify(invoiceInput),total);
+          const newId=Number(inserted.lastInsertRowid);
+          run('INSERT INTO invoice_versions(invoice_id,version,input,total,reason,actor_id) VALUES(?,?,?,?,?,?)',newId,1,JSON.stringify(invoiceInput),total,'Created via Spreadsheet',user.id);
+          audit(user,'CREATE','invoice',newId,null,{input:invoiceInput,total},'Created via Spreadsheet');
+        }
+      }
+      
+      db.exec('COMMIT');
+      return {ok:true,saved:rows.length};
+    }catch(err){
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  }
   if(method==='GET'){
     const bid=Number(url.searchParams.get('buildingId'));
     authorize(user,bid,false);
