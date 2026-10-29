@@ -1,0 +1,30 @@
+# Free deployment without credit card / billing
+services:
+  - type: web
+    name: vincent-art-taichinh
+    runtime: node
+    region: singapore
+    plan: free
+    autoDeployTrigger: off
+    buildCommand: npm run check
+    startCommand: node src/server.js
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "24.22.0"
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: VINCENT_DATA_DIR
+        value: ./data
+      - key: ADMIN_EMAIL
+        value: admin@vincent.local
+      - key: ADMIN_PASSWORD
+        value: Admin@Vincent2026!
+      - key: AI_API_URL
+        value: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+      - key: AI_MODEL
+        value: gemini-2.5-flash
+      - key: AI_API_KEY
+        sync: false

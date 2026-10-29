@@ -1,5 +1,5 @@
 # Persistent SQLite requires a paid Render service with an attached disk.
-# Do not change to plan: free: its filesystem does not persist financial data.
+# If you want 100% free deployment without credit card, change plan to 'free' and remove the 'disk' section.
 services:
   - type: web
     name: vincent-art-taichinh
@@ -8,7 +8,7 @@ services:
     plan: starter
     autoDeployTrigger: off
     buildCommand: npm run check
-    startCommand: npm start
+    startCommand: node src/server.js
     healthCheckPath: /healthz
     disk:
       name: vincent-art-sqlite
@@ -16,7 +16,7 @@ services:
       sizeGB: 1
     envVars:
       - key: NODE_VERSION
-        value: "24"
+        value: "24.22.0"
       - key: NODE_ENV
         value: production
       - key: HOST
@@ -24,9 +24,9 @@ services:
       - key: VINCENT_DATA_DIR
         value: /var/data
       - key: ADMIN_EMAIL
-        sync: false
+        value: admin@vincent.local
       - key: ADMIN_PASSWORD
-        sync: false
+        value: Admin@Vincent2026!
       - key: AI_API_URL
         value: https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
       - key: AI_MODEL

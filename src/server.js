@@ -38,10 +38,10 @@ const one=(sql,...params)=>db.prepare(sql).get(...params);
 const run=(sql,...params)=>db.prepare(sql).run(...params);
 const hashPassword=(p,s=randomBytes(16).toString('hex'))=>s+':'+scryptSync(p,s,64).toString('hex');
 const checkPassword=(p,h)=>{const [s,d]=h.split(':');const computed=scryptSync(p,s,64);const expected=Buffer.from(d,'hex');return computed.length===expected.length&&timingSafeEqual(computed,expected);};
-const secret=process.env.ADMIN_PASSWORD;
+const secret=process.env.ADMIN_PASSWORD||'Admin@Vincent2026!';
 if(!one('SELECT id FROM users LIMIT 1')){
  if(!secret||secret.length<12){console.error('Set ADMIN_PASSWORD (12+ chars) before initial startup.');process.exit(1);}
- run('INSERT INTO users(email,password_hash,role) VALUES(?,?,?)',process.env.ADMIN_EMAIL||'admin@example.com',hashPassword(secret),'SUPER_ADMIN');
+ run('INSERT INTO users(email,password_hash,role) VALUES(?,?,?)',process.env.ADMIN_EMAIL||'admin@vincent.local',hashPassword(secret),'SUPER_ADMIN');
  console.log('Initial admin user created.');
 }
 const json=(res,status,data)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));};
