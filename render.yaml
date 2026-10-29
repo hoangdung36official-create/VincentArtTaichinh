@@ -1,19 +1,13 @@
-# Persistent SQLite requires a paid Render service with an attached disk.
-# If you want 100% free deployment without credit card, change plan to 'free' and remove the 'disk' section.
 services:
   - type: web
     name: vincent-art-taichinh
     runtime: node
     region: singapore
-    plan: starter
+    plan: free
     autoDeployTrigger: off
     buildCommand: npm run check
     startCommand: node src/server.js
     healthCheckPath: /healthz
-    disk:
-      name: vincent-art-sqlite
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
       - key: NODE_VERSION
         value: "24.22.0"
@@ -22,7 +16,7 @@ services:
       - key: HOST
         value: 0.0.0.0
       - key: VINCENT_DATA_DIR
-        value: /var/data
+        value: ./data
       - key: ADMIN_EMAIL
         value: admin@vincent.local
       - key: ADMIN_PASSWORD
