@@ -1,7 +1,7 @@
 // Optional language understanding layer. Provider output is untrusted text:
 // the existing command parser, authorization, financial engine and preview
 // remain responsible for deciding which actions may be performed.
-const ALLOWED_TYPES=new Set(['create_building','create_building_floors','create_rooms','entity_search','debt_search','invoice_images','invoice_lookup','meter_batch','electric_rate','occupants','electric_reading','water_reading','import_help','help']);
+const ALLOWED_TYPES=new Set(['create_building','create_building_floors','create_rooms','entity_search','debt_search','invoice_images','invoice_lookup','meter_batch','electric_rate','occupants','electric_reading','water_reading','import_help','help','delete_invoice','missing_invoices','high_debt','summary','toggle_service','bulk_service_update','update_room_config']);
 
 export async function resolveAiCommand(message,selectedMonth,parse,config=process.env,request=fetch){
  const initial=parse(message,selectedMonth?Number(selectedMonth.slice(0,4)):new Date().getFullYear());

@@ -45,4 +45,12 @@ test('AI commands recognize Vietnamese building names, rooms, money, meters, deb
  assert.deepEqual(parseCommand('Lấy hóa đơn nhà A15 tháng 10/2026'),{type:'invoice_lookup',building:'A15',room:undefined,month:'2026-10'});
  assert.equal(parseCommand('Import Excel nhà A15').type,'import_help');
  assert.deepEqual(parseCommand('Tìm phòng A15.201'),{type:'entity_search',building:'A15',room:'201'});
+ assert.deepEqual(parseCommand('Xóa hóa đơn A15.201 tháng 10/2026'),{type:'delete_invoice',building:'A15',room:'201',month:'2026-10'});
+ assert.deepEqual(parseCommand('Phòng nào chưa có hóa đơn nhà A15 tháng 10/2026'),{type:'missing_invoices',building:'A15',month:'2026-10'});
+ assert.deepEqual(parseCommand('Phòng nào nợ nhiều nhất nhà A15 tháng 10/2026'),{type:'high_debt',building:'A15',month:'2026-10'});
+ assert.deepEqual(parseCommand('Tổng hợp nhà A15 tháng 10/2026'),{type:'summary',building:'A15',month:'2026-10'});
+ assert.deepEqual(parseCommand('Tắt internet phòng A15.201'),{type:'toggle_service',building:'A15',room:'201',service:'internet',enabled:false});
+ assert.deepEqual(parseCommand('Bật sạc xe điện phòng A15.301'),{type:'toggle_service',building:'A15',room:'301',service:'evCharging',enabled:true});
+ assert.deepEqual(parseCommand('Sửa giá dịch vụ A15.201 lên 170.000'),{type:'update_room_config',building:'A15',room:'201',updates:{serviceRate:170000}});
+ assert.deepEqual(parseCommand('Cập nhật giá dịch vụ tất cả phòng nhà A15 lên 170.000'),{type:'bulk_service_update',building:'A15',updates:{serviceRate:170000}});
 });

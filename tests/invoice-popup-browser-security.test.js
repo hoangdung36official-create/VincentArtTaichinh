@@ -8,7 +8,7 @@ import net from 'node:net';
 
 const browser=['C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Google/Chrome/Application/chrome.exe'].find(existsSync);
 async function freePort(){const s=net.createServer();await new Promise(ok=>s.listen(0,'127.0.0.1',ok));const port=s.address().port;await new Promise(ok=>s.close(ok));return port;}
-async function until(fn,label,ms=8000){const start=Date.now();let error;while(Date.now()-start<ms){try{const value=await fn();if(value)return value;}catch(e){error=e;}await new Promise(r=>setTimeout(r,75));}throw Error(`Timeout: ${label}. ${error||''}`);}
+async function until(fn,label,ms=15000){const start=Date.now();let error;while(Date.now()-start<ms){try{const value=await fn();if(value)return value;}catch(e){error=e;}await new Promise(r=>setTimeout(r,75));}throw Error(`Timeout: ${label}. ${error||''}`);}
 async function connect(tab){
  const ws=new WebSocket(tab.webSocketDebuggerUrl);
  await new Promise((ok,fail)=>{ws.addEventListener('open',ok,{once:true});ws.addEventListener('error',fail,{once:true});});

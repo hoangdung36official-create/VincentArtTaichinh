@@ -3,12 +3,12 @@ import {readFileSync,existsSync,mkdirSync} from 'node:fs';
 import {join,resolve,extname} from 'node:path';
 import {randomBytes,scryptSync,timingSafeEqual,createHash} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
-import {calculateInvoice,balance} from './finance.js';
+import {calculateInvoice,balance,migrateSchema,deleteInvoiceRecord,calculateItemAmounts} from './finance.js';
 import {parseCommand} from './ai-command.js';
 import {resolveAiCommand} from './ai-provider.js';
 import {parseCsv,parseVndInteger,importedMonth} from './import-csv.js';
 import {xlsxCsv,xlsxSheets,xlsxTable} from './import-xlsx.js';
-import {analyzeA12Table} from './import-a12.js';
+import {analyzeA12Table,reviewA12Row} from './import-a12.js';
 import {exportCsv} from './export-csv.js';
 
 const base=resolve('.');
@@ -31,9 +31,8 @@ CREATE INDEX IF NOT EXISTS idx_rooms_building ON rooms(building_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_period ON invoices(period_id);
 CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity,entity_id);`);
-if(!db.prepare('PRAGMA table_info(rooms)').all().some(c=>c.name==='occupants')) db.exec('ALTER TABLE rooms ADD COLUMN occupants INTEGER NOT NULL DEFAULT 0');
-for(const column of ['electric_rate','water_rate'])if(!db.prepare('PRAGMA table_info(rooms)').all().some(c=>c.name===column))
- db.exec(`ALTER TABLE rooms ADD COLUMN ${column} INTEGER DEFAULT NULL CHECK(${column}>=0)`);
+migrateSchema(db);
+db.exec('CREATE TABLE IF NOT EXISTS invoice_charge_rules(invoice_id INTEGER NOT NULL REFERENCES invoices(id),version INTEGER NOT NULL,details TEXT NOT NULL,PRIMARY KEY(invoice_id,version))');
 const query=(sql,...params)=>db.prepare(sql).all(...params);
 const one=(sql,...params)=>db.prepare(sql).get(...params);
 const run=(sql,...params)=>db.prepare(sql).run(...params);
@@ -54,7 +53,7 @@ const allowed=(user,buildingId)=>user.role==='SUPER_ADMIN'||!!one('SELECT 1 FROM
 const authorize=(user,buildingId,write=true)=>{if(write&&!['SUPER_ADMIN','MANAGER','ACCOUNTANT','COLLECTOR'].includes(user.role))throw fail(403,'Read only');if(!allowed(user,buildingId))throw fail(403,'Building access denied');};
 const requireRole=(user,roles)=>{if(!roles.includes(user.role))throw fail(403,'Insufficient role');};
 const monthValid=month=>typeof month==='string'&&/^\d{4}-(0[1-9]|1[0-2])$/.test(month);
-const invoiceInputFields=new Set(['rent','previousElectric','currentElectric','previousWater','currentWater','electricRate','waterRate','internet','cleaning','parking','extras','discount']);
+const invoiceInputFields=new Set(['rent','previousElectric','currentElectric','previousWater','currentWater','electricRate','waterRate','internet','cleaning','parking','extras','discount','electricEnabled','waterEnabled','internetEnabled','internetRate','serviceEnabled','serviceCount','serviceRate','parkingEnabled','parkingCount','parkingRate','evChargingEnabled','evChargingCount','evChargingRate']);
 const invoiceOverrides=value=>{
  if(value===undefined)return {};
  if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!invoiceInputFields.has(key)))throw fail(400,'Invalid invoice input fields');
@@ -87,7 +86,51 @@ function carryoverConflict(roomId,month,before,after){
 function initialInvoiceInput(room,month,overrides={}){
  const prev=one('SELECT i.input FROM invoices i JOIN periods p ON p.id=i.period_id WHERE i.room_id=? AND p.month=?',room.id,previousMonth(month));
  const prior=prev?JSON.parse(prev.input):null;
- return {rent:room.rent,internet:room.internet,cleaning:room.cleaning,parking:room.parking,previousElectric:prior?.currentElectric??null,currentElectric:null,previousWater:prior?.currentWater??null,currentWater:null,electricRate:room.electric_rate,waterRate:room.water_rate,extras:0,discount:0,...overrides};
+ const electricEnabled = overrides.electricEnabled !== undefined ? Boolean(overrides.electricEnabled) : (room.electric_enabled !== 0);
+ const waterEnabled = overrides.waterEnabled !== undefined ? Boolean(overrides.waterEnabled) : (room.water_enabled !== 0);
+ const internetEnabled = overrides.internetEnabled !== undefined ? Boolean(overrides.internetEnabled) : (room.internet_enabled !== 0);
+ const serviceEnabled = overrides.serviceEnabled !== undefined ? Boolean(overrides.serviceEnabled) : (room.service_enabled !== 0);
+ const parkingEnabled = overrides.parkingEnabled !== undefined ? Boolean(overrides.parkingEnabled) : (room.parking_enabled !== 0);
+ const evChargingEnabled = overrides.evChargingEnabled !== undefined ? Boolean(overrides.evChargingEnabled) : Boolean(room.ev_charging_enabled);
+
+ const electricRate = overrides.electricRate ?? room.electric_rate ?? room.electric_rate_effective ?? 3800;
+ const waterRate = overrides.waterRate ?? room.water_rate ?? room.water_rate_effective ?? 0;
+ const internetRate = overrides.internetRate ?? overrides.internet ?? room.internet_rate ?? room.internet ?? 0;
+ const serviceRate = overrides.serviceRate ?? (overrides.cleaning !== undefined ? overrides.cleaning : (room.service_rate ?? room.cleaning ?? 0));
+ const serviceCount = overrides.serviceCount ?? (overrides.cleaning !== undefined ? 1 : (room.service_count ?? (room.occupants > 0 ? room.occupants : (serviceRate > 0 ? 1 : 0))));
+ const parkingRate = overrides.parkingRate ?? (overrides.parking !== undefined ? overrides.parking : (room.parking_rate ?? room.parking ?? 0));
+ const parkingCount = overrides.parkingCount ?? (overrides.parking !== undefined ? (overrides.parking > 0 ? 1 : 0) : (room.parking_count ?? (room.parking > 0 ? 1 : 0)));
+ const evChargingCount = overrides.evChargingCount ?? room.ev_charging_count ?? 0;
+ const evChargingRate = overrides.evChargingRate ?? room.ev_charging_rate ?? 100000;
+
+ return {
+   rent: overrides.rent ?? room.rent,
+   electricEnabled,
+   previousElectric: prior?.currentElectric ?? null,
+   currentElectric: null,
+   electricRate,
+   waterEnabled,
+   previousWater: prior?.currentWater ?? null,
+   currentWater: null,
+   waterRate,
+   internetEnabled,
+   internetRate,
+   internet: internetRate,
+   serviceEnabled,
+   serviceCount,
+   serviceRate,
+   cleaning: overrides.cleaning ?? (serviceCount * serviceRate),
+   parkingEnabled,
+   parkingCount,
+   parkingRate,
+   parking: overrides.parking ?? (parkingCount * parkingRate),
+   evChargingEnabled,
+   evChargingCount,
+   evChargingRate,
+   extras: 0,
+   discount: 0,
+   ...overrides
+ };
 }
 function inheritedMeterChanges(room,month,overrides){
  const inherited=initialInvoiceInput(room,month);
@@ -194,9 +237,20 @@ function csvPlan(body,user){
    if(seen.has(code))throw Error('Phòng bị lặp trong file');seen.add(code);
    if(period&&one('SELECT id FROM invoices WHERE period_id=? AND room_id=?',period.id,room.id))throw Error('Phòng đã có hóa đơn, không tự ghi đè');
    const changes={};
-   for(const key of ['previousElectric','currentElectric','previousWater','currentWater','rent','internet','cleaning','parking','electricRate','waterRate','extras','discount']){
+   for(const key of [
+     'previousElectric','currentElectric','previousWater','currentWater',
+     'rent','internet','cleaning','parking','electricRate','waterRate',
+     'internetRate','serviceRate','serviceCount','parkingRate','parkingCount',
+     'evChargingRate','evChargingCount','extras','discount'
+   ]){
     const num=parseVndInteger(row[key],key,!['previousElectric','currentElectric','previousWater','currentWater'].includes(key));
     if(num!==undefined)changes[key]=num;
+   }
+   for(const key of ['electricEnabled','waterEnabled','internetEnabled','serviceEnabled','parkingEnabled','evChargingEnabled']){
+     if(row[key]!==undefined){
+       const v = String(row[key]).trim().toLowerCase();
+       changes[key] = !['0','false','khong','tat'].includes(v);
+     }
    }
    const conflicts=inheritedMeterChanges(room,month,changes);
    if(conflicts.length)throw Error(`Chỉ số cũ lệch kỳ trước (${conflicts.join(', ')}); cần kiểm tra và điều chỉnh có lý do trước khi nhập`);
@@ -213,9 +267,9 @@ function csvPlan(body,user){
 function aiPlan(command,user,selectedMonth=null){
  if(selectedMonth!==null&&!monthValid(selectedMonth))throw fail(400,'Tháng được chọn không hợp lệ');
  const intent=parseCommand(command,selectedMonth?Number(selectedMonth.slice(0,4)):new Date().getFullYear());
- if(['water_reading','electric_reading','meter_batch','debt_search','invoice_images'].includes(intent.type)&&!intent.month&&selectedMonth)intent.month=selectedMonth;
+ if(['water_reading','electric_reading','meter_batch','debt_search','invoice_images','delete_invoice','missing_invoices','high_debt','summary'].includes(intent.type)&&!intent.month&&selectedMonth)intent.month=selectedMonth;
  if(intent.type==='invoice_lookup'&&!intent.room&&!intent.month&&selectedMonth)intent.month=selectedMonth;
- if(intent.type==='help')return {type:intent.type,readOnly:true,reply:'Lệnh mẫu: Thêm tòa nhà A15 tên Nhà A15; thêm các phòng 201,202 nhà A15 giá phòng 4.000.000 internet 100.000; tìm phòng nhà A15; tìm công nợ nhà A15 tháng 10/2026; nhập điện mới nhà A15: 201=130, 202=140 tháng 10/2026; xuất ảnh hóa đơn nhà A15 tháng 10/2026; import Excel nhà A15.'};
+ if(intent.type==='help')return {type:intent.type,readOnly:true,reply:'Lệnh mẫu: Thêm tòa nhà A15 tên Nhà A15; thêm các phòng 201,202 nhà A15 giá phòng 4.000.000 internet 100.000; tìm phòng nhà A15; tìm công nợ nhà A15 tháng 10/2026; tổng hợp tài chính nhà A15 tháng 10/2026; phòng nào chưa có hóa đơn nhà A15; phòng nào nợ nhiều nhất nhà A15; nhập điện mới nhà A15: 201=130, 202=140 tháng 10/2026; xóa hóa đơn A15.201 tháng 10/2026; tắt internet phòng A15.201; sửa giá dịch vụ A15.201 lên 170.000đ; cập nhật giá dịch vụ tất cả phòng nhà A15 lên 170.000đ; xuất ảnh hóa đơn nhà A15 tháng 10/2026; import Excel nhà A15.'};
  if(intent.type==='import_help'){
   if(intent.building){const b=one('SELECT id FROM buildings WHERE UPPER(code)=?',intent.building);if(!b)throw fail(404,'Không tìm thấy tòa nhà');authorize(user,b.id,false);}
   return {type:intent.type,readOnly:true,navigate:'imports',reply:'Mở mục Import AI / Excel, chọn đúng tòa và kỳ, tải XLSX/CSV, kiểm tra bản xem trước rồi xác nhận nhập. AI không tự ghi dữ liệu từ tệp chưa được xem trước.'};
@@ -283,6 +337,84 @@ function aiPlan(command,user,selectedMonth=null){
     WHERE p.building_id=? AND (? IS NULL OR r.code=?) AND (? IS NULL OR p.month=?) ORDER BY p.month DESC,r.code LIMIT 100`,b.id,intent.room||null,intent.room||null,intent.month||null,intent.month||null).map(detail);
   return {type:intent.type,readOnly:true,reply:invoices.length?`Tìm thấy ${invoices.length} hóa đơn cho nhà ${intent.building} (tối đa 100).`:'Chưa có hóa đơn phù hợp.',invoices:invoices.map(x=>({id:x.id,room:x.room_code,month:x.month,total:x.total,paid:x.paid,due:x.due,version:x.version}))};
  }
+ if(intent.type==='summary'){
+  if(!intent.building)throw fail(400,'Cần chỉ rõ mã nhà để xem tổng hợp');
+  const b=one('SELECT * FROM buildings WHERE UPPER(code)=?',intent.building);if(!b)throw fail(404,'Không tìm thấy nhà');authorize(user,b.id,false);
+  if(!intent.month)throw fail(400,'Cần chọn tháng/năm để xem tổng hợp');
+  const totalRooms=one('SELECT COUNT(*) count FROM rooms WHERE building_id=?',b.id).count;
+  const invoices=query('SELECT i.* FROM invoices i JOIN periods p ON p.id=i.period_id WHERE p.building_id=? AND p.month=?',b.id,intent.month);
+  const stats=financialStats(invoices,totalRooms);
+  return {type:intent.type,readOnly:true,stats,reply:`📊 Tổng hợp nhà ${b.code} (${b.name}) kỳ ${intent.month}: ${stats.invoiced}/${stats.rooms} phòng có hóa đơn; Phải thu: ${stats.total.toLocaleString('vi-VN')}đ; Đã thu: ${stats.paid.toLocaleString('vi-VN')}đ (${stats.total?Math.round(stats.paid/stats.total*100):0}%); Còn thiếu: ${stats.due.toLocaleString('vi-VN')}đ; Thu đủ: ${stats.complete} phòng, thu thiếu: ${stats.partial} phòng, chưa thu: ${stats.unpaid} phòng.`};
+ }
+ if(intent.type==='missing_invoices'){
+  if(!intent.building)throw fail(400,'Cần chỉ rõ mã nhà để tra cứu');
+  const b=one('SELECT * FROM buildings WHERE UPPER(code)=?',intent.building);if(!b)throw fail(404,'Không tìm thấy nhà');authorize(user,b.id,false);
+  if(!intent.month)throw fail(400,'Cần chọn tháng/năm để tra cứu');
+  const missing=query(`SELECT r.code,r.tenant,r.rent FROM rooms r WHERE r.building_id=? AND NOT EXISTS (SELECT 1 FROM invoices i JOIN periods p ON p.id=i.period_id WHERE p.building_id=r.building_id AND p.month=? AND i.room_id=r.id) ORDER BY r.code`,b.id,intent.month);
+  return {type:intent.type,readOnly:true,records:missing,reply:missing.length?`Nhà ${b.code} kỳ ${intent.month} có ${missing.length} phòng chưa có hóa đơn: ${missing.map(m=>m.code).join(', ')}.`:`Tất cả các phòng nhà ${b.code} đã có hóa đơn kỳ ${intent.month}.`};
+ }
+ if(intent.type==='high_debt'){
+  if(!intent.building)throw fail(400,'Cần chỉ rõ mã nhà để tra cứu nợ');
+  const b=one('SELECT * FROM buildings WHERE UPPER(code)=?',intent.building);if(!b)throw fail(404,'Không tìm thấy nhà');authorize(user,b.id,false);
+  if(!intent.month)throw fail(400,'Cần chọn tháng/năm để tra cứu');
+  const debts=query(`SELECT i.*,p.month,r.code room_code,r.tenant FROM invoices i JOIN periods p ON p.id=i.period_id JOIN rooms r ON r.id=i.room_id WHERE p.building_id=? AND p.month=?`,b.id,intent.month).map(detail).filter(x=>x.due>0).sort((a,b)=>b.due-a.due).slice(0,10);
+  return {type:intent.type,readOnly:true,records:debts.map(x=>({room:x.room_code,tenant:x.tenant||'—',total:x.total,paid:x.paid,due:x.due})),reply:debts.length?`Nhà ${b.code} kỳ ${intent.month} có ${debts.length} phòng nợ nhiều nhất: ${debts.map(x=>`P.${x.room_code} (nợ ${x.due.toLocaleString('vi-VN')}đ)`).join('; ')}.`:`Nhà ${b.code} kỳ ${intent.month} không có phòng nào còn nợ.`};
+ }
+ if(intent.type==='delete_invoice'){
+  requireRole(user,['SUPER_ADMIN','MANAGER','ACCOUNTANT']);
+  if(!intent.building||!intent.room)throw fail(400,'Cần nêu rõ tòa và phòng để xóa hóa đơn');
+  const b=one('SELECT id,code FROM buildings WHERE UPPER(code)=?',intent.building);if(!b)throw fail(404,'Không tìm thấy nhà');authorize(user,b.id);
+  if(!intent.month)throw fail(400,'Cần chỉ rõ tháng/năm của hóa đơn');
+  const inv=one(`SELECT i.*,p.locked,p.month,r.code room_code FROM invoices i JOIN periods p ON p.id=i.period_id JOIN rooms r ON r.id=i.room_id WHERE p.building_id=? AND p.month=? AND r.code=?`,b.id,intent.month,intent.room);
+  if(!inv)throw fail(404,`Không tìm thấy hóa đơn ${b.code}.${intent.room} kỳ ${intent.month}`);
+  if(inv.locked)throw fail(409,'Kỳ đã khóa');
+  return {type:intent.type,items:[{invoiceId:inv.id,building:b.code,room:intent.room,month:intent.month,total:inv.total}],reply:`Xác nhận XÓA hóa đơn ${b.code}.${intent.room} kỳ ${intent.month} (Tổng: ${inv.total.toLocaleString('vi-VN')}đ)? Mọi thanh toán liên quan cũng sẽ bị xóa an toàn.`};
+ }
+ if(intent.type==='toggle_service'){
+  requireRole(user,['SUPER_ADMIN','MANAGER']);
+  if(!intent.building||!intent.room)throw fail(400,'Cần nêu rõ tòa và phòng để bật/tắt dịch vụ');
+  const b=one('SELECT id,code FROM buildings WHERE UPPER(code)=?',intent.building);if(!b)throw fail(404,'Không tìm thấy nhà');authorize(user,b.id);
+  const room=one('SELECT * FROM rooms WHERE building_id=? AND code=?',b.id,intent.room);
+  if(!room)throw fail(404,`Không tìm thấy phòng ${b.code}.${intent.room}`);
+  const colMap={electric:'electric_enabled',water:'water_enabled',internet:'internet_enabled',service:'service_enabled',parking:'parking_enabled',evCharging:'ev_charging_enabled'};
+  const col=colMap[intent.service];if(!col)throw fail(400,'Dịch vụ không hợp lệ');
+  const targetVal=intent.enabled?1:0;
+  if(room[col]===targetVal)throw fail(409,`Dịch vụ phòng ${intent.room} đã ở trạng thái ${targetVal?'BẬT':'TẮT'}`);
+  const svcNames={electric:'điện',water:'nước',internet:'internet',service:'dịch vụ',parking:'gửi xe',evCharging:'sạc xe điện'};
+  return {type:intent.type,items:[{roomId:room.id,building:b.code,room:intent.room,service:intent.service,col,from:room[col],to:targetVal}],reply:`Xác nhận ${intent.enabled?'BẬT':'TẮT'} ${svcNames[intent.service]} phòng ${b.code}.${intent.room}?`};
+ }
+ if(intent.type==='update_room_config'){
+  requireRole(user,['SUPER_ADMIN','MANAGER']);
+  if(!intent.building||!intent.room)throw fail(400,'Cần nêu rõ tòa và phòng');
+  const b=one('SELECT id,code FROM buildings WHERE UPPER(code)=?',intent.building);if(!b)throw fail(404,'Không tìm thấy nhà');authorize(user,b.id);
+  const room=one('SELECT * FROM rooms WHERE building_id=? AND code=?',b.id,intent.room);
+  if(!room)throw fail(404,`Không tìm thấy phòng ${b.code}.${intent.room}`);
+  const updates=intent.updates||{},changes={},desc=[];
+  if(updates.serviceRate!==undefined){safeInt(updates.serviceRate,'serviceRate');changes.service_rate=updates.serviceRate;changes.cleaning=updates.serviceRate*(room.service_count||1);desc.push(`giá DV: ${room.service_rate}đ → ${updates.serviceRate.toLocaleString('vi-VN')}đ`);}
+  if(updates.parkingRate!==undefined){safeInt(updates.parkingRate,'parkingRate');changes.parking_rate=updates.parkingRate;changes.parking=updates.parkingRate*(room.parking_count||1);desc.push(`giá xe: ${room.parking_rate}đ → ${updates.parkingRate.toLocaleString('vi-VN')}đ`);}
+  if(updates.evChargingRate!==undefined){safeInt(updates.evChargingRate,'evChargingRate');changes.ev_charging_rate=updates.evChargingRate;desc.push(`giá sạc xe: ${room.ev_charging_rate}đ → ${updates.evChargingRate.toLocaleString('vi-VN')}đ`);}
+  if(updates.internetRate!==undefined){safeInt(updates.internetRate,'internetRate');changes.internet_rate=updates.internetRate;changes.internet=updates.internetRate;desc.push(`giá internet: ${room.internet_rate}đ → ${updates.internetRate.toLocaleString('vi-VN')}đ`);}
+  if(updates.rent!==undefined){safeInt(updates.rent,'rent');changes.rent=updates.rent;desc.push(`tiền phòng: ${room.rent}đ → ${updates.rent.toLocaleString('vi-VN')}đ`);}
+  if(updates.parkingCount!==undefined){safeInt(updates.parkingCount,'parkingCount');changes.parking_count=updates.parkingCount;changes.parking=(room.parking_rate||0)*updates.parkingCount;desc.push(`số xe: ${room.parking_count} → ${updates.parkingCount}`);}
+  if(updates.evChargingCount!==undefined){safeInt(updates.evChargingCount,'evChargingCount');changes.ev_charging_count=updates.evChargingCount;desc.push(`số xe điện: ${room.ev_charging_count} → ${updates.evChargingCount}`);}
+  if(!desc.length)throw fail(400,'Không có thay đổi nào cần cập nhật');
+  return {type:intent.type,items:[{roomId:room.id,building:b.code,room:intent.room,changes}],reply:`Xác nhận cập nhật phòng ${b.code}.${intent.room}: ${desc.join(', ')}?`};
+ }
+ if(intent.type==='bulk_service_update'){
+  requireRole(user,['SUPER_ADMIN','MANAGER']);
+  if(!intent.building)throw fail(400,'Cần nêu rõ mã nhà');
+  const b=one('SELECT id,code FROM buildings WHERE UPPER(code)=?',intent.building);if(!b)throw fail(404,'Không tìm thấy nhà');authorize(user,b.id);
+  const rooms=query('SELECT * FROM rooms WHERE building_id=?',b.id);
+  if(!rooms.length)throw fail(404,'Tòa nhà chưa có phòng nào');
+  const updates=intent.updates||{},changes={},desc=[];
+  if(updates.serviceRate!==undefined){safeInt(updates.serviceRate,'serviceRate');changes.service_rate=updates.serviceRate;desc.push(`giá dịch vụ thành ${updates.serviceRate.toLocaleString('vi-VN')}đ`);}
+  if(updates.parkingRate!==undefined){safeInt(updates.parkingRate,'parkingRate');changes.parking_rate=updates.parkingRate;desc.push(`giá xe thành ${updates.parkingRate.toLocaleString('vi-VN')}đ`);}
+  if(updates.evChargingRate!==undefined){safeInt(updates.evChargingRate,'evChargingRate');changes.ev_charging_rate=updates.evChargingRate;desc.push(`giá sạc xe điện thành ${updates.evChargingRate.toLocaleString('vi-VN')}đ`);}
+  if(updates.internetRate!==undefined){safeInt(updates.internetRate,'internetRate');changes.internet_rate=updates.internetRate;changes.internet=updates.internetRate;desc.push(`giá internet thành ${updates.internetRate.toLocaleString('vi-VN')}đ`);}
+  if(updates.rent!==undefined){safeInt(updates.rent,'rent');changes.rent=updates.rent;desc.push(`tiền phòng thành ${updates.rent.toLocaleString('vi-VN')}đ`);}
+  if(!desc.length)throw fail(400,'Không có thay đổi nào cần cập nhật');
+  return {type:intent.type,items:[{buildingId:b.id,building:b.code,count:rooms.length,changes}],reply:`Xác nhận cập nhật TOÀN BỘ ${rooms.length} phòng nhà ${b.code}: ${desc.join(', ')}?`};
+ }
  if(intent.type==='meter_batch'){
   requireRole(user,['SUPER_ADMIN','MANAGER','ACCOUNTANT']);
   if(!intent.building||!intent.month||!intent.readings.length||intent.readings.length>100||new Set(intent.readings.map(r=>r.room)).size!==intent.readings.length)throw fail(400,'Cần mã nhà, kỳ và tối đa 100 phòng không trùng');
@@ -338,31 +470,50 @@ function initialA12Plan(body,user){
  const prior=building?one('SELECT * FROM periods WHERE building_id=? AND month=?',building.id,month):null;
  const known=building?query('SELECT * FROM rooms WHERE building_id=?',building.id):[];
  const roomMap=new Map(known.map(r=>[r.code,r]));
- const rows=[],items=[];
+  const rows=[],items=[];
+  const edits=body.edits??{};
+  if(!edits||typeof edits!=='object'||Array.isArray(edits)||Object.keys(edits).length>500||Object.keys(edits).some(k=>!/^\d{2,5}$/.test(k)))throw fail(400,'Danh sách chỉnh sửa phòng không hợp lệ');
+  if(Object.keys(edits).some(code=>!parsed.rows.some(row=>row.code===code)))throw fail(400,'Có phòng chỉnh sửa không nằm trong Excel');
  for(const item of parsed.rows){
-  const errors=[...item.errors],existing=roomMap.get(item.code);
+   const errors=[...item.errors],existing=roomMap.get(item.code),edit=edits[item.code]??{};
+   let reviewed=null;
+   try{reviewed=reviewA12Row(item,edit);}catch(e){errors.push(e.message);}
+   // Edited meter values supersede obsolete Excel usage columns. Preserve every
+   // other source issue and show discrepancies for explicit acknowledgment.
+   if(reviewed){
+    for(const [key,fields] of [['Số điện không khớp',['previousElectric','currentElectric']],['Số nước không khớp',['previousWater','currentWater']]]){
+     if(fields.some(field=>Object.hasOwn(edit,field))){const idx=errors.findIndex(e=>e.startsWith(key));if(idx>=0)errors.splice(idx,1);}
+    }
+   }
   if(prior?.locked)errors.push('Kỳ đã khóa');
-  if(existing&&prior&&one('SELECT id FROM invoices WHERE period_id=? AND room_id=?',prior.id,existing.id))errors.push('Đã có hóa đơn, không ghi đè');
-  if(existing&&item.input){
+   const existingInvoice=existing&&prior?one('SELECT id,input,total,version FROM invoices WHERE period_id=? AND room_id=?',prior.id,existing.id):null;
+   if(existing&&reviewed){
    const previous=one('SELECT i.input FROM invoices i JOIN periods p ON p.id=i.period_id WHERE i.room_id=? AND p.month=?',existing.id,previousMonth(month));
    if(previous){const previousInput=JSON.parse(previous.input);
-    if(previousInput.currentElectric!==item.previousElectric||previousInput.currentWater!==item.previousWater)errors.push('Chỉ số cũ khác chỉ số chốt tháng trước');
+     if(previousInput.currentElectric!==reviewed.input.previousElectric||previousInput.currentWater!==reviewed.input.previousWater)errors.push('Chỉ số cũ khác chỉ số chốt tháng trước');
    }
   }
-  const selectedRateE=item.input?.electricRate??null,selectedRateW=item.input?.waterRate??null;
+   const selectedRateE=reviewed?.input.electricRate??null,selectedRateW=reviewed?.input.waterRate??null;
   const old=existing?{rent:existing.rent,internet:existing.internet,cleaning:existing.cleaning,occupants:existing.occupants,electricRate:existing.electric_rate,waterRate:existing.water_rate}:null;
-  const configuration=item.input?{rent:item.rent,internet:item.internet,cleaning:item.cleaning,occupants:item.occupants,
+   const configuration=reviewed?{rent:reviewed.input.rent,internet:reviewed.input.internet,cleaning:reviewed.input.cleaning,occupants:reviewed.occupants,
    electricRate:selectedRateE=== (building?.electric_rate??parsed.defaults.electricRate)?null:selectedRateE,
    waterRate:selectedRateW=== (building?.water_rate??parsed.defaults.waterRate)?null:selectedRateW}:null;
   const roomChange=!!existing&&Object.entries(configuration??{}).some(([key,value])=>old?.[key]!==value);
-  if(!errors.length)items.push({code:item.code,roomId:existing?.id??null,old,configuration,roomChange,input:item.input,total:item.total});
-  rows.push({...item,status:errors.length?'ERROR':'READY',errors,exists:!!existing,old,configuration,roomChange});
+   const invoiceChange=!!existingInvoice&&reviewed&&(JSON.stringify(reviewed.input)!==existingInvoice.input||reviewed.total!==existingInvoice.total);
+   const impact=invoiceChange?carryoverConflict(existing.id,month,JSON.parse(existingInvoice.input),reviewed.input):null;
+   if(!errors.length)items.push({code:item.code,roomId:existing?.id??null,invoiceId:existingInvoice?.id??null,invoiceVersion:existingInvoice?.version??null,old,configuration,roomChange,input:reviewed.input,total:reviewed.total,charges:reviewed.charges,impact});
+   rows.push({...item,status:errors.length?'ERROR':'READY',errors,exists:!!existing,old,configuration,roomChange,
+    input:reviewed?.input,total:reviewed?.total,occupants:reviewed?.occupants??item.occupants,
+    difference:reviewed?.difference,charges:reviewed?.charges,invoiceAction:existingInvoice?(invoiceChange?'REVISE':'UNCHANGED'):'CREATE',impact});
  }
- const errors=rows.filter(r=>r.status==='ERROR').length+parsed.summaryIssues.length;
+  const errors=rows.filter(r=>r.status==='ERROR').length;
  const unmapped=rows.filter(r=>r.unmapped&&(r.unmapped.M||r.unmapped.O)).length;
+  const totals={...parsed.totals,computed:items.reduce((sum,item)=>{const n=sum+item.total;if(!Number.isSafeInteger(n))throw fail(400,'Tổng tiền vượt giới hạn');return n;},0)};
  return {building:{id:building?.id??null,code,name:building?.name??name,address:building?.address??address,exists:!!building},
-  month,sheetName:sheet.sheetName,defaults:parsed.defaults,sourceSummary:parsed.sourceSummary,totals:parsed.totals,
-  summaryIssues:parsed.summaryIssues,rows,items,unmapped,roomChanges:rows.filter(row=>row.status==='READY'&&row.roomChange).length,ready:items.length,errors};
+   month,sheetName:sheet.sheetName,defaults:parsed.defaults,sourceSummary:parsed.sourceSummary,totals,
+   summaryIssues:parsed.summaryIssues,rows,items,unmapped,roomChanges:rows.filter(row=>row.status==='READY'&&row.roomChange).length,
+   differences:rows.filter(row=>row.status==='READY'&&row.difference!==0).length,
+   carryovers:rows.filter(row=>row.status==='READY'&&row.impact).length,ready:items.length,errors};
 }
 async function handle(method,url,body,user){
  const parts=url.pathname.split('/').filter(Boolean),id=Number(parts[2]);
@@ -377,7 +528,7 @@ async function handle(method,url,body,user){
     if(!plan.errors&&plan.ready){
      for(const [key,value] of initialImportPreviews)if(value.expires<Date.now())initialImportPreviews.delete(key);
      const previewId=randomBytes(24).toString('hex');
-     initialImportPreviews.set(previewId,{userId:user.id,source:{month:plan.month,buildingCode:plan.building.code,buildingName:body.buildingName,address:body.address,xlsxBase64:body.xlsxBase64,sheetName:plan.sheetName},
+      initialImportPreviews.set(previewId,{userId:user.id,source:{month:plan.month,buildingCode:plan.building.code,buildingName:body.buildingName,address:body.address,xlsxBase64:body.xlsxBase64,sheetName:plan.sheetName,edits:body.edits??{}},
       expected:JSON.stringify({items:plan.items,totals:plan.totals,summaryIssues:plan.summaryIssues}),expires:Date.now()+5*60_000});
      return {...plan,items:undefined,previewId};
     }
@@ -391,8 +542,13 @@ async function handle(method,url,body,user){
      const plan=initialA12Plan(pending.source,user);
      if(plan.errors||!plan.ready||JSON.stringify({items:plan.items,totals:plan.totals,summaryIssues:plan.summaryIssues})!==pending.expected)
       throw fail(409,'Dữ liệu thay đổi hoặc chưa đối soát xong, cần xem trước lại');
+      const reviewed=body.reviewedRooms;
+      if(!Array.isArray(reviewed)||reviewed.length!==plan.items.length||new Set(reviewed).size!==plan.items.length||
+         plan.items.some(item=>!reviewed.includes(item.code)))throw fail(409,'Cần kiểm tra và xác nhận đủ từng phòng trước khi lưu');
+      if((plan.differences||plan.summaryIssues.length)&&body.acknowledgeDifferences!==true)throw fail(409,'Cần xác nhận chênh lệch giữa Excel và tổng tính lại, không tự tạo khoản bù');
      if(plan.unmapped&&body.acknowledgeUnmapped!==true)throw fail(409,'Cần xác nhận các cột chưa xác định sẽ không tính vào hóa đơn');
      if(plan.roomChanges&&body.acknowledgeRoomChanges!==true)throw fail(409,'Cần xác nhận riêng việc cập nhật cấu hình phòng đã tồn tại');
+      if(plan.carryovers&&body.acknowledgeCarryover!==true)throw fail(409,'Cần xác nhận chỉ số kỳ sau phải được đối soát thủ công');
      let buildingId=plan.building.id;
      if(!buildingId){
       const ins=run('INSERT INTO buildings(code,name,address,electric_rate,water_rate) VALUES(?,?,?,?,?)',plan.building.code,plan.building.name,plan.building.address,plan.defaults.electricRate,plan.defaults.waterRate);
@@ -401,7 +557,7 @@ async function handle(method,url,body,user){
      run('INSERT OR IGNORE INTO periods(building_id,month) VALUES(?,?)',buildingId,plan.month);
      const period=one('SELECT * FROM periods WHERE building_id=? AND month=?',buildingId,plan.month);
      if(period.locked)throw fail(409,'Kỳ đã khóa');
-     let created=0,updated=0;
+      let created=0,updated=0,revised=0,unchanged=0,invoicesCreated=0;
      for(const item of plan.items){
       let roomId=item.roomId;
       const cfg=item.configuration;
@@ -415,14 +571,27 @@ async function handle(method,url,body,user){
        roomId=Number(ins.lastInsertRowid);created++;
        audit(user,'A12_IMPORT_ROOM','room',roomId,null,{code:item.code,...cfg},'Reviewed initial import');
       }
-      const inv=run('INSERT INTO invoices(period_id,room_id,input,total) VALUES(?,?,?,?)',period.id,roomId,JSON.stringify(item.input),item.total);
-      const invoiceId=Number(inv.lastInsertRowid);
-      run('INSERT INTO invoice_versions(invoice_id,version,input,total,reason,actor_id) VALUES(?,?,?,?,?,?)',invoiceId,1,JSON.stringify(item.input),item.total,'Initial A12 XLSX import',user.id);
-      audit(user,'A12_IMPORT_INVOICE','invoice',invoiceId,null,{room:item.code,month:plan.month,total:item.total,sourceSheet:plan.sheetName},'Reviewed initial import');
+       let invoiceId=item.invoiceId,version=1;
+       if(invoiceId){
+        const before=one('SELECT * FROM invoices WHERE id=?',invoiceId);
+        if(before.version!==item.invoiceVersion)throw fail(409,'Phiên bản hóa đơn đã thay đổi, xem trước lại');
+        if(before.input===JSON.stringify(item.input)&&before.total===item.total){unchanged++;continue;}
+        version=before.version+1;
+        if(run('UPDATE invoices SET input=?,total=?,version=? WHERE id=? AND version=?',JSON.stringify(item.input),item.total,version,invoiceId,before.version).changes!==1)throw fail(409,'Hóa đơn đã thay đổi');
+        run('INSERT INTO invoice_versions(invoice_id,version,input,total,reason,actor_id) VALUES(?,?,?,?,?,?)',invoiceId,version,JSON.stringify(item.input),item.total,'Reviewed A12 re-import',user.id);
+        audit(user,'A12_IMPORT_INVOICE_REVISE','invoice',invoiceId,{version:before.version,total:before.total,input:JSON.parse(before.input)},{version,total:item.total,input:item.input},'Reviewed A12 re-import');
+        revised++;
+       }else{
+        const inv=run('INSERT INTO invoices(period_id,room_id,input,total) VALUES(?,?,?,?)',period.id,roomId,JSON.stringify(item.input),item.total);
+        invoiceId=Number(inv.lastInsertRowid);invoicesCreated++;
+        run('INSERT INTO invoice_versions(invoice_id,version,input,total,reason,actor_id) VALUES(?,?,?,?,?,?)',invoiceId,version,JSON.stringify(item.input),item.total,'Initial A12 XLSX import',user.id);
+        audit(user,'A12_IMPORT_INVOICE','invoice',invoiceId,null,{room:item.code,month:plan.month,total:item.total,sourceSheet:plan.sheetName},'Reviewed initial import');
+       }
+       run('INSERT INTO invoice_charge_rules(invoice_id,version,details) VALUES(?,?,?)',invoiceId,version,JSON.stringify(item.charges));
      }
-     audit(user,'A12_IMPORT_PERIOD','period',period.id,null,{count:plan.items.length,created,updated,sourceSheet:plan.sheetName,unmappedAcknowledged:!!plan.unmapped},'Reviewed initial import');
+      audit(user,'A12_IMPORT_PERIOD','period',period.id,null,{count:plan.items.length,created,updated,invoicesCreated,revised,unchanged,sourceSheet:plan.sheetName,unmappedAcknowledged:!!plan.unmapped},'Reviewed initial import');
      db.exec('COMMIT');initialImportPreviews.delete(String(body.previewId));
-     return {ok:true,buildingId,month:plan.month,count:plan.items.length,created,updated};
+      return {ok:true,buildingId,month:plan.month,count:plan.items.length,created,updated,invoicesCreated,revised,unchanged};
     }catch(e){db.exec('ROLLBACK');throw e;}
    }
   }
@@ -450,30 +619,90 @@ async function handle(method,url,body,user){
    const pending=importPreviews.get(previewId);
    if(!pending||pending.userId!==user.id||pending.expires<Date.now())throw fail(409,'Bản xem trước hết hạn, cần kiểm tra lại');
    db.exec('BEGIN IMMEDIATE');try{
-    const excel=pending.source.xlsxBase64?xlsxCsv(pending.source.xlsxBase64,pending.source.month,pending.source.sheetName):null;
-    const plan=csvPlan({...pending.source,...excel},user);
-    if(plan.errors||!plan.ready||JSON.stringify(plan.items)!==pending.items)throw fail(409,'Dữ liệu đã đổi, cần xem trước lại');
-    run('INSERT OR IGNORE INTO periods(building_id,month) VALUES(?,?)',plan.buildingId,plan.month);
-    const period=one('SELECT * FROM periods WHERE building_id=? AND month=?',plan.buildingId,plan.month);
+    let itemsToSave=null;
+    if(Array.isArray(body.items)&&body.items.length>0){
+      itemsToSave=body.items.map(item=>{
+        const room=one('SELECT id, building_id FROM rooms WHERE id=? AND building_id=?',item.roomId,pending.source.buildingId);
+        if(!room)throw fail(400,`Phòng ${item.code||item.roomId} không hợp lệ`);
+        const total=calculateInvoice(item.input);
+        return {roomId:item.roomId,code:item.code,input:item.input,total};
+      });
+    }else{
+      const excel=pending.source.xlsxBase64?xlsxCsv(pending.source.xlsxBase64,pending.source.month,pending.source.sheetName):null;
+      const plan=csvPlan({...pending.source,...excel},user);
+      if(plan.errors||!plan.ready||JSON.stringify(plan.items)!==pending.items)throw fail(409,'Dữ liệu đã đổi, cần xem trước lại');
+      itemsToSave=plan.items;
+    }
+    run('INSERT OR IGNORE INTO periods(building_id,month) VALUES(?,?)',pending.source.buildingId,pending.source.month);
+    const period=one('SELECT * FROM periods WHERE building_id=? AND month=?',pending.source.buildingId,pending.source.month);
     if(period.locked)throw fail(409,'Kỳ đã khóa');
-    for(const item of plan.items){
+    for(const item of itemsToSave){
      const inserted=run('INSERT INTO invoices(period_id,room_id,input,total) VALUES(?,?,?,?)',period.id,item.roomId,JSON.stringify(item.input),item.total);
      const invoiceId=Number(inserted.lastInsertRowid);
      run('INSERT INTO invoice_versions(invoice_id,version,input,total,reason,actor_id) VALUES(?,?,?,?,?,?)',invoiceId,1,JSON.stringify(item.input),item.total,'Imported from reviewed CSV',user.id);
-     audit(user,'IMPORT_CSV_INVOICE','invoice',invoiceId,null,{room:item.code,month:plan.month,total:item.total},'Reviewed CSV import');
+     audit(user,'IMPORT_CSV_INVOICE','invoice',invoiceId,null,{room:item.code,month:pending.source.month,total:item.total},'Reviewed CSV import');
     }
-    audit(user,'IMPORT_CSV','period',period.id,null,{count:plan.ready},'Reviewed CSV import');
+    audit(user,'IMPORT_CSV','period',period.id,null,{count:itemsToSave.length},'Reviewed CSV import');
     db.exec('COMMIT');importPreviews.delete(previewId);
-    return {ok:true,count:plan.ready,month:plan.month};
+    return {ok:true,count:itemsToSave.length,month:pending.source.month};
    }catch(e){db.exec('ROLLBACK');throw e;}
   }
+ }
+ if(parts[1]==='settings'&&parts[2]==='ai'){
+  requireRole(user,['SUPER_ADMIN']);
+  const getSetting=k=>one('SELECT value FROM settings WHERE key=?',k)?.value;
+  if(method==='GET'){
+   const key=getSetting('AI_API_KEY')||process.env.AI_API_KEY||'';
+   const apiUrl=getSetting('AI_API_URL')||process.env.AI_API_URL||'https://generativelanguage.googleapis.com/v1beta/chat/completions';
+   const model=getSetting('AI_MODEL')||process.env.AI_MODEL||'gemini-2.5-flash';
+   return {
+    configured:Boolean(key),
+    maskedKey:key?`${key.slice(0,4)}...${key.slice(-4)}`:'',
+    url:apiUrl,
+    model
+   };
+  }
+  if(method==='POST'){
+   const key=body.key!==undefined?String(body.key).trim():null;
+   const apiUrl=body.url!==undefined?String(body.url).trim():null;
+   const model=body.model!==undefined?String(body.model).trim():null;
+   if(key!==null&&key!=='')run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value','AI_API_KEY',key);
+   if(apiUrl!==null&&apiUrl!=='')run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value','AI_API_URL',apiUrl);
+   if(model!==null&&model!=='')run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value','AI_MODEL',model);
+   audit(user,'UPDATE_AI_SETTINGS','settings',0,null,{model,hasKey:Boolean(key)},'Updated AI settings');
+   return {ok:true,message:'Đã lưu cấu hình AI thành công.'};
+  }
+ }
+ if(parts[1]==='assistant'&&parts[2]==='insights'&&method==='GET'){
+  const bid=Number(url.searchParams.get('buildingId'));
+  const m=url.searchParams.get('month');
+  authorize(user,bid,false);
+  if(!monthValid(m))throw fail(400,'Tháng không hợp lệ');
+  const b=one('SELECT * FROM buildings WHERE id=?',bid);
+  if(!b)throw fail(404,'Không tìm thấy tòa nhà');
+  const missing=query(`SELECT r.code,r.tenant FROM rooms r WHERE r.building_id=? AND NOT EXISTS (SELECT 1 FROM invoices i JOIN periods p ON p.id=i.period_id WHERE p.building_id=r.building_id AND p.month=? AND i.room_id=r.id) ORDER BY r.code`,bid,m);
+  const debts=query(`SELECT i.*,p.month,r.code room_code,r.tenant FROM invoices i JOIN periods p ON p.id=i.period_id JOIN rooms r ON r.id=i.room_id WHERE p.building_id=? AND p.month=?`,bid,m).map(detail).filter(x=>x.due>0).sort((a,b)=>b.due-a.due);
+  const totalDue=debts.reduce((sum,x)=>sum+x.due,0);
+  return {
+   buildingCode:b.code,
+   month:m,
+   missingInvoices:missing.map(x=>x.code),
+   highDebts:debts.slice(0,5).map(x=>({room:x.room_code,tenant:x.tenant||'—',due:x.due})),
+   totalDue
+  };
  }
  if(parts[1]==='assistant'&&method==='POST'){
   if(parts[2]==='preview'){
    const message=String(requireValue(body.message,'message'));
    if(message.length>1800)throw fail(400,'Yêu cầu AI quá dài');
    const selectedMonth=body.month??null;
-   const command=await resolveAiCommand(message,selectedMonth,parseCommand);
+   const getSetting=k=>one('SELECT value FROM settings WHERE key=?',k)?.value;
+   const aiConfig={
+    AI_API_KEY:getSetting('AI_API_KEY')||process.env.AI_API_KEY,
+    AI_API_URL:getSetting('AI_API_URL')||process.env.AI_API_URL,
+    AI_MODEL:getSetting('AI_MODEL')||process.env.AI_MODEL
+   };
+   const command=await resolveAiCommand(message,selectedMonth,parseCommand,aiConfig);
    const plan=aiPlan(command,user,selectedMonth);
    if(plan.readOnly)return plan;
    for(const [key,value] of aiPreviews)if(value.expires<Date.now())aiPreviews.delete(key);
@@ -524,10 +753,37 @@ async function handle(method,url,body,user){
       run('INSERT INTO invoice_versions(invoice_id,version,input,total,reason,actor_id) VALUES(?,?,?,?,?,?)',inv.id,inv.version+1,JSON.stringify(updated),total,reason,user.id);
       audit(user,field==='currentElectric'?'AI_ELECTRIC_EDIT':'AI_WATER_EDIT','invoice',inv.id,{input:before,total:inv.total},{input:updated,total,carryoverReview:item.impact||undefined},reason);
      }
+     if(plan.type==='delete_invoice'){
+      deleteInvoiceRecord(db,item.invoiceId,user,reason,true);
+     }
+     if(plan.type==='toggle_service'){
+      run(`UPDATE rooms SET ${item.col}=? WHERE id=?`,item.to,item.roomId);
+      audit(user,'AI_TOGGLE_SERVICE','room',item.roomId,{[item.col]:item.from},{[item.col]:item.to},reason);
+     }
+     if(plan.type==='update_room_config'){
+      const sets=Object.keys(item.changes).map(k=>`${k}=?`).join(', ');
+      const vals=[...Object.values(item.changes),item.roomId];
+      run(`UPDATE rooms SET ${sets} WHERE id=?`,...vals);
+      audit(user,'AI_UPDATE_ROOM','room',item.roomId,null,item.changes,reason);
+     }
+     if(plan.type==='bulk_service_update'){
+      const sets=Object.keys(item.changes).map(k=>`${k}=?`).join(', ');
+      const vals=[...Object.values(item.changes),item.buildingId];
+      run(`UPDATE rooms SET ${sets} WHERE building_id=?`,...vals);
+      audit(user,'AI_BULK_UPDATE_ROOMS','building',item.buildingId,null,item.changes,reason);
+     }
     }
     db.exec('COMMIT');aiPreviews.delete(previewId);
     const edited=['water_reading','electric_reading','meter_batch'].includes(plan.type);
-    return {ok:true,reply:edited?'Đã sửa và lưu phiên bản hóa đơn. Bạn có muốn lấy hóa đơn vừa sửa không?':plan.type==='create_building_floors'?`Đã tạo nhà ${plan.items[0].code} cùng ${plan.items.length-1} phòng.`:plan.type.startsWith('create_')?`Đã tạo thành công ${plan.items.length} mục.`:`Đã cập nhật thành công ${plan.items.length} thay đổi.`,invoiceId:edited&&plan.items.length===1?plan.items[0].invoiceId:null,invoiceIds:edited?plan.items.map(i=>i.invoiceId):[]};
+    const replyMsg=plan.type==='delete_invoice'?`Đã xóa thành công hóa đơn ${plan.items[0]?.building}.${plan.items[0]?.room} kỳ ${plan.items[0]?.month}.`
+      :plan.type==='toggle_service'?`Đã cập nhật trạng thái dịch vụ phòng ${plan.items[0]?.building}.${plan.items[0]?.room}.`
+      :plan.type==='update_room_config'?`Đã cập nhật cấu hình phòng ${plan.items[0]?.building}.${plan.items[0]?.room}.`
+      :plan.type==='bulk_service_update'?`Đã cập nhật cấu hình toàn bộ ${plan.items[0]?.count||''} phòng nhà ${plan.items[0]?.building}.`
+      :edited?'Đã sửa và lưu phiên bản hóa đơn. Bạn có muốn lấy hóa đơn vừa sửa không?'
+      :plan.type==='create_building_floors'?`Đã tạo nhà ${plan.items[0].code} cùng ${plan.items.length-1} phòng.`
+      :plan.type.startsWith('create_')?`Đã tạo thành công ${plan.items.length} mục.`
+      :`Đã cập nhật thành công ${plan.items.length} thay đổi.`;
+    return {ok:true,reply:replyMsg,invoiceId:edited&&plan.items.length===1?plan.items[0].invoiceId:null,invoiceIds:edited?plan.items.map(i=>i.invoiceId):[]};
    }catch(e){db.exec('ROLLBACK');throw e;}
   }
  }
@@ -537,8 +793,75 @@ async function handle(method,url,body,user){
   if(method==='POST'){if(user.role!=='SUPER_ADMIN')throw fail(403,'Admin only');const code=String(requireValue(body.code,'code')).trim().toUpperCase(),name=String(requireValue(body.name,'name')).trim();const inserted=run('INSERT INTO buildings(code,name,address,electric_rate,water_rate) VALUES(?,?,?,?,?)',code,name,body.address||'',safeInt(body.electricRate??3800,'electricRate'),safeInt(body.waterRate??0,'waterRate'));audit(user,'CREATE','building',Number(inserted.lastInsertRowid),null,{code,name});return {id:Number(inserted.lastInsertRowid)};}
  }
  if(parts[1]==='rooms'){
-  if(method==='GET'){const bid=Number(url.searchParams.get('buildingId'));authorize(user,bid,false);return query('SELECT * FROM rooms WHERE building_id=? ORDER BY code',bid);}
-  if(method==='POST'){requireRole(user,['SUPER_ADMIN','MANAGER']);const bid=Number(body.buildingId);authorize(user,bid);const inserted=run('INSERT INTO rooms(building_id,code,rent,internet,cleaning,parking,tenant) VALUES(?,?,?,?,?,?,?)',bid,String(requireValue(body.code,'code')).trim(),safeInt(body.rent??0,'rent'),safeInt(body.internet??0,'internet'),safeInt(body.cleaning??0,'cleaning'),safeInt(body.parking??0,'parking'),body.tenant||'');audit(user,'CREATE','room',Number(inserted.lastInsertRowid),null,body);return {id:Number(inserted.lastInsertRowid)};}
+  if(method==='GET'){
+    const bid=Number(url.searchParams.get('buildingId'));
+    authorize(user,bid,false);
+    return query('SELECT r.*, COALESCE(r.electric_rate,b.electric_rate) electric_rate_effective, COALESCE(r.water_rate,b.water_rate) water_rate_effective FROM rooms r JOIN buildings b ON b.id=r.building_id WHERE r.building_id=? ORDER BY r.code',bid).map(r=>({
+      ...r,
+      electric_rate: r.electric_rate ?? r.electric_rate_effective,
+      water_rate: r.water_rate ?? r.water_rate_effective,
+      internet_rate: r.internet_rate ?? r.internet,
+      service_rate: r.service_rate ?? r.cleaning ?? 0,
+      service_count: r.service_count ?? (r.occupants > 0 ? r.occupants : 1),
+      parking_rate: r.parking_rate ?? r.parking ?? 0,
+      parking_count: r.parking_count ?? (r.parking > 0 ? 1 : 0),
+      ev_charging_rate: r.ev_charging_rate ?? 100000,
+      ev_charging_count: r.ev_charging_count ?? 0
+    }));
+  }
+  if(method==='POST'){
+    requireRole(user,['SUPER_ADMIN','MANAGER']);
+    const bid=Number(body.buildingId);
+    authorize(user,bid);
+    const code = String(requireValue(body.code,'code')).trim();
+    const rent = safeInt(body.rent??0,'rent');
+    const tenant = body.tenant||'';
+
+    const electricEnabled = body.electricEnabled !== undefined ? (body.electricEnabled ? 1 : 0) : 1;
+    const electricRate = body.electricRate !== undefined && body.electricRate !== '' && body.electricRate !== null ? safeInt(Number(body.electricRate), 'electricRate') : null;
+
+    const waterEnabled = body.waterEnabled !== undefined ? (body.waterEnabled ? 1 : 0) : 1;
+    const waterRate = body.waterRate !== undefined && body.waterRate !== '' && body.waterRate !== null ? safeInt(Number(body.waterRate), 'waterRate') : null;
+
+    const internetEnabled = body.internetEnabled !== undefined ? (body.internetEnabled ? 1 : 0) : 1;
+    const internetRate = body.internetRate !== undefined && body.internetRate !== '' ? safeInt(Number(body.internetRate), 'internetRate') : (body.internet !== undefined && body.internet !== '' ? safeInt(Number(body.internet), 'internet') : 0);
+    const internet = internetRate;
+
+    const serviceEnabled = body.serviceEnabled !== undefined ? (body.serviceEnabled ? 1 : 0) : 1;
+    const serviceRate = body.serviceRate !== undefined && body.serviceRate !== '' ? safeInt(Number(body.serviceRate), 'serviceRate') : (body.cleaning !== undefined && body.cleaning !== '' ? safeInt(Number(body.cleaning), 'cleaning') : 0);
+    const occupants = body.occupants !== undefined && body.occupants !== '' ? safeInt(Number(body.occupants), 'occupants') : 0;
+    const serviceCount = body.serviceCount !== undefined && body.serviceCount !== '' ? safeInt(Number(body.serviceCount), 'serviceCount') : (occupants > 0 ? occupants : (serviceRate > 0 ? 1 : 0));
+    const cleaning = body.cleaning !== undefined && body.cleaning !== '' ? safeInt(Number(body.cleaning), 'cleaning') : (serviceCount * serviceRate);
+
+    const parkingEnabled = body.parkingEnabled !== undefined ? (body.parkingEnabled ? 1 : 0) : 1;
+    const parkingRate = body.parkingRate !== undefined && body.parkingRate !== '' ? safeInt(Number(body.parkingRate), 'parkingRate') : (body.parking !== undefined && body.parking !== '' ? safeInt(Number(body.parking), 'parking') : 0);
+    const parkingCount = body.parkingCount !== undefined && body.parkingCount !== '' ? safeInt(Number(body.parkingCount), 'parkingCount') : (parkingRate > 0 ? 1 : 0);
+    const parking = body.parking !== undefined && body.parking !== '' ? safeInt(Number(body.parking), 'parking') : (parkingCount * parkingRate);
+
+    const evChargingEnabled = body.evChargingEnabled ? 1 : 0;
+    const evChargingCount = body.evChargingCount !== undefined && body.evChargingCount !== '' ? safeInt(Number(body.evChargingCount), 'evChargingCount') : 0;
+    const evChargingRate = body.evChargingRate !== undefined && body.evChargingRate !== '' ? safeInt(Number(body.evChargingRate), 'evChargingRate') : 100000;
+
+    const inserted=run(`INSERT INTO rooms(
+      building_id, code, rent, tenant,
+      electric_enabled, electric_rate,
+      water_enabled, water_rate,
+      internet_enabled, internet_rate, internet,
+      service_enabled, service_count, service_rate, occupants, cleaning,
+      parking_enabled, parking_count, parking_rate, parking,
+      ev_charging_enabled, ev_charging_count, ev_charging_rate
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      bid, code, rent, tenant,
+      electricEnabled, electricRate,
+      waterEnabled, waterRate,
+      internetEnabled, internetRate, internet,
+      serviceEnabled, serviceCount, serviceRate, occupants, cleaning,
+      parkingEnabled, parkingCount, parkingRate, parking,
+      evChargingEnabled, evChargingCount, evChargingRate
+    );
+    audit(user,'CREATE','room',Number(inserted.lastInsertRowid),null,body);
+    return {id:Number(inserted.lastInsertRowid)};
+  }
  }
  if(parts[1]==='periods'){
   if(method==='GET'){const bid=Number(url.searchParams.get('buildingId'));authorize(user,bid,false);return query('SELECT * FROM periods WHERE building_id=? ORDER BY month DESC',bid);}
@@ -572,6 +895,15 @@ async function handle(method,url,body,user){
   return inspectPeriod(buildingId,month);
  }
  if(parts[1]==='invoices'){
+  if(method==='DELETE'&&parts.length===3&&Number.isSafeInteger(id)){
+   requireRole(user,['SUPER_ADMIN','MANAGER','ACCOUNTANT']);
+   const current=one('SELECT i.*,p.building_id,p.locked,r.code room_code,p.month FROM invoices i JOIN periods p ON p.id=i.period_id JOIN rooms r ON r.id=i.room_id WHERE i.id=?',id);
+   if(!current)throw fail(404,'Invoice missing');
+   authorize(user,current.building_id);
+   if(current.locked)throw fail(409,'Period locked');
+   deleteInvoiceRecord(db, id, user, body?.reason || 'Deleted invoice');
+   return {ok:true,id};
+  }
   if(method==='GET'&&parts.length===3&&Number.isSafeInteger(id)){
    const invoice=one('SELECT i.*,p.month,p.building_id,r.code room_code,b.code building_code,b.name building_name,b.address FROM invoices i JOIN periods p ON p.id=i.period_id JOIN rooms r ON r.id=i.room_id JOIN buildings b ON b.id=p.building_id WHERE i.id=?',id);
    if(!invoice)throw fail(404,'Invoice missing');authorize(user,invoice.building_id,false);return detail(invoice);
@@ -606,13 +938,13 @@ async function handle(method,url,body,user){
    if(!body.input||typeof body.input!=='object'||Array.isArray(body.input))throw fail(400,'Invalid invoice input');
    const before=JSON.parse(current.input);
    const keys=Object.keys(body.input);
-   if(keys.some(key=>!Object.hasOwn(before,key)))throw fail(400,'Unexpected invoice field');
+   if(keys.some(key=>!invoiceInputFields.has(key)))throw fail(400,'Unexpected invoice field');
    const next={...before,...body.input};const total=calculateInvoice(next),paymentTotal=paid(id);
    return {invoiceId:id,version:current.version,input:next,changed:JSON.stringify(before)!==JSON.stringify(next),oldTotal:current.total,newTotal:total,delta:total-current.total,paid:paymentTotal,...balance(total,paymentTotal),carryover:carryoverConflict(current.room_id,current.month,before,next)};
   }
   if(parts.length===4&&parts[3]==='revise'&&method==='POST'){
    requireRole(user,['SUPER_ADMIN','MANAGER','ACCOUNTANT']);
-   const current=one('SELECT i.*,p.building_id,p.locked,p.month FROM invoices i JOIN periods p ON p.id=i.period_id WHERE i.id=?',id);if(!current)throw fail(404,'Invoice missing');authorize(user,current.building_id);if(current.locked)throw fail(409,'Period locked');const reason=String(requireValue(body.reason,'reason')).trim();if(!reason||reason.length>500)throw fail(400,'Reason required (max 500 characters)');if(body.expectedVersion!==undefined&&body.expectedVersion!==current.version)throw fail(409,'Hóa đơn đã thay đổi, cần tải lại trước khi sửa');if(!body.input||typeof body.input!=='object'||Array.isArray(body.input))throw fail(400,'Invalid invoice input');const before=JSON.parse(current.input);if(Object.keys(body.input).some(key=>!Object.hasOwn(before,key)))throw fail(400,'Unexpected invoice field');const input={...before,...body.input};const total=calculateInvoice(input);if(JSON.stringify(before)===JSON.stringify(input))throw fail(409,'Không có dữ liệu thay đổi để tạo phiên bản mới');const next=current.version+1;
+   const current=one('SELECT i.*,p.building_id,p.locked,p.month FROM invoices i JOIN periods p ON p.id=i.period_id WHERE i.id=?',id);if(!current)throw fail(404,'Invoice missing');authorize(user,current.building_id);if(current.locked)throw fail(409,'Period locked');const reason=String(requireValue(body.reason,'reason')).trim();if(!reason||reason.length>500)throw fail(400,'Reason required (max 500 characters)');if(body.expectedVersion!==undefined&&body.expectedVersion!==current.version)throw fail(409,'Hóa đơn đã thay đổi, cần tải lại trước khi sửa');if(!body.input||typeof body.input!=='object'||Array.isArray(body.input))throw fail(400,'Invalid invoice input');const before=JSON.parse(current.input);if(Object.keys(body.input).some(key=>!invoiceInputFields.has(key)))throw fail(400,'Unexpected invoice field');const input={...before,...body.input};const total=calculateInvoice(input);if(JSON.stringify(before)===JSON.stringify(input))throw fail(409,'Không có dữ liệu thay đổi để tạo phiên bản mới');const next=current.version+1;
    db.exec('BEGIN IMMEDIATE');try{
     if(one('SELECT locked FROM periods WHERE id=?',current.period_id).locked)throw fail(409,'Period locked');
     const impact=carryoverConflict(current.room_id,current.month,before,input);
@@ -707,8 +1039,8 @@ const server=http.createServer(async(req,res)=>{
    return json(res,200,{ok:true});
   }
   if(url.pathname.startsWith('/api/')){
-   if(!['GET','POST'].includes(method))throw fail(405,'Method not allowed');
-   let body={};if(method==='POST'){
+   if(!['GET','POST','DELETE'].includes(method))throw fail(405,'Method not allowed');
+   let body={};if(method==='POST'||method==='DELETE'){
     const chunks=[];let bytes=0,tooLarge=false;
     for await(const chunk of req){
      bytes+=chunk.length;
@@ -717,9 +1049,9 @@ const server=http.createServer(async(req,res)=>{
     }
     if(tooLarge)throw fail(413,'Request too large');
     const raw=Buffer.concat(chunks).toString('utf8');
-    try{body=JSON.parse(raw||'{}');}catch{throw fail(400,'Invalid JSON');}
+    if(raw.trim())try{body=JSON.parse(raw);}catch{throw fail(400,'Invalid JSON');}
    }
-   if(method==='POST'){
+   if(method==='POST'||method==='DELETE'){
     // Fetch metadata is supplied by browsers and cannot be set by cross-site scripts.
     if(req.headers['sec-fetch-site']==='cross-site')throw fail(403,'Cross-site request blocked');
     const origin=req.headers.origin;

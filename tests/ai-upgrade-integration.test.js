@@ -125,6 +125,39 @@ test('AI upgrade uses scoped, one-time preview and atomic financial edits',{time
    assert.equal((await ok(`invoices/${first}`,undefined,admin)).input.currentElectric,130);
   });
 
+  await t.test('new AI features: summary, missing invoices, high debt, toggle, room config, bulk update, delete invoice',async()=>{
+   const summary=await ask('Tổng hợp tài chính nhà A15 tháng 10/2026',viewerCookie);
+   assert.equal(summary.type,'summary');assert.ok(summary.reply.includes('Tổng hợp'));
+   const missing=await ask('Phòng nào chưa có hóa đơn nhà A15 tháng 10/2026',viewerCookie);
+   assert.equal(missing.type,'missing_invoices');assert.ok(missing.records.some(r=>r.code==='203'));
+   const highDebt=await ask('Phòng nào nợ nhiều nhất nhà A15 tháng 10/2026',viewerCookie);
+   assert.equal(highDebt.type,'high_debt');assert.ok(highDebt.records.length>0);
+
+   const togglePrev=await ask('Tắt internet phòng A15.201');
+   assert.equal(togglePrev.type,'toggle_service');assert.equal(togglePrev.items[0].to,0);
+   await apply(togglePrev);
+   const r201=(await ok(`rooms?buildingId=${b.id}`,undefined,admin)).find(r=>r.code==='201');
+   assert.equal(r201.internet_enabled,0);
+
+   const configPrev=await ask('Sửa giá dịch vụ A15.201 lên 170.000');
+   assert.equal(configPrev.type,'update_room_config');
+   await apply(configPrev);
+   const r201b=(await ok(`rooms?buildingId=${b.id}`,undefined,admin)).find(r=>r.code==='201');
+   assert.equal(r201b.service_rate,170000);
+
+   const bulkPrev=await ask('Cập nhật giá dịch vụ tất cả phòng nhà A15 lên 170.000');
+   assert.equal(bulkPrev.type,'bulk_service_update');
+   await apply(bulkPrev);
+   const r202=(await ok(`rooms?buildingId=${b.id}`,undefined,admin)).find(r=>r.code==='202');
+   assert.equal(r202.service_rate,170000);
+
+   const third=(await ok('invoices',{roomId:room('203').id,month:'2026-10',input:baseInput},admin)).id;
+   const delPrev=await ask('Xóa hóa đơn A15.203 tháng 10/2026');
+   assert.equal(delPrev.type,'delete_invoice');
+   await apply(delPrev);
+   await reject(`invoices/${third}`,undefined,admin,404);
+  });
+
   await t.test('locked billing period denies AI edits and preserves ledger',async()=>{
    const preview=await ask('Nhập điện mới nhà A15: 201=135, 202=145 tháng 10/2026');
    // Test lock state directly through the authorized locking endpoint with acknowledged missing rooms.
@@ -137,5 +170,8 @@ test('AI upgrade uses scoped, one-time preview and atomic financial edits',{time
   assert.ok(logs.some(x=>x.action==='AI_CREATE_BUILDING'));
   assert.ok(logs.some(x=>x.action==='AI_CREATE_ROOM'));
   assert.ok(logs.some(x=>x.action==='AI_ELECTRIC_EDIT'));
+  assert.ok(logs.some(x=>x.action==='AI_TOGGLE_SERVICE'));
+  assert.ok(logs.some(x=>x.action==='AI_UPDATE_ROOM'));
+  assert.ok(logs.some(x=>x.action==='AI_BULK_UPDATE_ROOMS'));
  }finally{child.kill();await new Promise(r=>child.once('exit',r));rmSync(dataDir,{recursive:true,force:true});}
 });

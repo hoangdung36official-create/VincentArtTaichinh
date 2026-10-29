@@ -65,3 +65,39 @@
 .import-check{display:flex;align-items:flex-start;gap:10px;padding:12px 0;font-size:12px;line-height:1.5}
 .import-check input{margin:2px 0 0;flex-shrink:0}
 .import-blocked{padding:13px 15px;border-left:3px solid #777;background:#f5f5f5;font-size:12px}
+
+/* Collapsible action bar and toggle buttons */
+.action-bar{display:flex;align-items:center;gap:10px}
+button.danger{color:#dc2626;border-color:#fca5a5}
+button.danger:hover{background:#fee2e2;color:#b91c1c}
+.btn-sm{padding:4px 10px;font-size:12px}
+.btn-xs{padding:2px 6px;font-size:11px}
+
+/* Import editable table styling */
+.import-preview-table{min-width:1100px;font-size:12px}
+.import-preview-table th,.import-preview-table td{padding:8px 6px;vertical-align:top}
+.import-preview-table input[type=number]{padding:4px 6px;font-size:12px;border:1px solid #ccc;border-radius:4px}
+.import-preview-table input[type=number]:focus{border-color:#171717;outline:none}
+.import-preview-table .amount-total{font-size:13px;color:#171717}
+
+/* Invoice editor dialog enhancements */
+.editor-section{border:1px solid #e8e8e8;border-radius:8px;padding:12px 14px;margin-bottom:14px;background:#fafafa}
+.editor-section h3{margin:0 0 10px;font-size:14px;font-weight:600}
+.section-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.section-title h3{margin:0}
+.toggle-label{display:inline-flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;font-weight:500}
+.editor-fields-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.quick-rates{display:flex;align-items:center;gap:6px;font-size:12px;grid-column:1/-1;margin-top:2px}
+
+/* AI Panel enhancements: quick prompts & config drawer */
+.ai-head-btn{background:none;color:#fff;border:0;cursor:pointer;font-size:16px;padding:2px 6px;border-radius:4px}
+.ai-head-btn:hover{background:#333}
+.ai-quick-prompts{display:flex;gap:6px;padding:8px 12px;overflow-x:auto;white-space:nowrap;background:#fafafa;border-top:1px solid #eee;border-bottom:1px solid #eee}
+.ai-quick-prompts::-webkit-scrollbar{height:4px}
+.ai-quick-prompts::-webkit-scrollbar-thumb{background:#ccc;border-radius:4px}
+.ai-chip{background:#fff;border:1px solid #ddd;border-radius:12px;padding:4px 9px;font-size:11px;font-weight:550;color:#333;cursor:pointer;flex-shrink:0;transition:all .15s}
+.ai-chip:hover{background:#171717;color:#fff;border-color:#171717}
+.ai-config-drawer{background:#f9f9f9;border-bottom:1px solid #e5e5e5;padding:12px 16px;font-size:12px}
+.ai-config-drawer input{width:100%;padding:6px 8px;font-size:12px;border:1px solid #ccc;border-radius:5px;margin-top:3px;box-sizing:border-box}
+
+

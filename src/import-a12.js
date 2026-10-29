@@ -92,7 +92,7 @@ export function analyzeA12Table(rows){
    internet:item.internet,cleaning:item.cleaning,parking:0,extras:0,discount:0};
   try{
    item.total=calculateInvoice(input);item.input=input;item.difference=item.stated-item.total;
-   if(item.difference)item.errors.push(`Lệch tổng tiền ${item.difference}đ (Excel ${item.stated}đ, tính lại ${item.total}đ)`);
+   if(item.difference)item.warnings.push(`Lệch tổng tiền ${item.difference}đ (Excel ${item.stated}đ, tính lại ${item.total}đ); cần xác nhận số tính lại`);
   }catch(e){item.errors.push('Tính tiền: '+e.message);}
   for(const key of ['occupants','rent','electricity','water','internet','cleaning','stated'])totals[key]+=item[key];
   totals.computed+=item.total??0;
@@ -104,4 +104,47 @@ export function analyzeA12Table(rows){
  }}
  if(totals.stated!==totals.computed)summaryIssues.push(`Tổng các phòng Excel chênh ${totals.stated-totals.computed}đ so với công thức`);
  return {rows:parsed,defaults,totals,sourceSummary,summaryIssues};
+}
+
+// Reviewed values are recalculated in the backend. Only explicit known fields
+// are accepted; an Excel discrepancy is never silently converted to revenue.
+const editableFields=['occupants','rent','previousElectric','currentElectric','previousWater','currentWater','electricRate','waterRate'];
+const chargeFields=['internet','cleaning','parking','extras'];
+const moneyInt=(value,name)=>{
+ if(typeof value!=='number'||!Number.isSafeInteger(value)||value<0)throw Error(`${name} phải là số nguyên không âm`);
+ return value;
+};
+export function reviewA12Row(row,edit={}){
+ if(!row.input)throw Error(`Phòng ${row.code} có dữ liệu gốc lỗi, cần sửa Excel và nhập lại`);
+ if(!edit||typeof edit!=='object'||Array.isArray(edit)||Object.keys(edit).some(k=>![...editableFields,'charges'].includes(k)))throw Error('Trường chỉnh sửa không hợp lệ');
+ const input={...row.input};
+ let occupants=row.occupants;
+ for(const field of editableFields){
+  if(edit[field]===undefined)continue;
+  const value=edit[field];
+  if(field==='occupants'||field==='rent'||field.endsWith('Rate'))moneyInt(value,field);
+  else if(typeof value!=='number'||!Number.isFinite(value)||value<0||Math.abs(value*1000-Math.round(value*1000))>0.000001)throw Error(`${field} không hợp lệ`);
+  if(field==='occupants')occupants=value;
+  else input[field]=value;
+ }
+ if(occupants>100)throw Error('Số người tối đa 100');
+ const charges={};
+ const provided=edit.charges||{};
+ if(typeof provided!=='object'||Array.isArray(provided)||Object.keys(provided).some(k=>!chargeFields.includes(k)))throw Error('Danh sách phí không hợp lệ');
+ for(const name of chargeFields){
+  const source=provided[name];
+  if(source!==undefined&&(!source||typeof source!=='object'||Array.isArray(source)||Object.keys(source).some(k=>!['basis','unitPrice','quantity'].includes(k))))throw Error(`Cấu hình ${name} không hợp lệ`);
+  const basis=source?.basis??'ROOM';
+  if(!['ROOM','PERSON','QUANTITY'].includes(basis))throw Error(`Kiểu tính ${name} không hợp lệ`);
+  const unitPrice=moneyInt(source?.unitPrice??input[name],`${name}.unitPrice`);
+  const quantity=moneyInt(source?.quantity??1,`${name}.quantity`);
+  if(quantity>100000)throw Error(`Số lượng ${name} vượt giới hạn`);
+  const units=basis==='ROOM'?1:basis==='PERSON'?occupants:quantity;
+  const charge=BigInt(unitPrice)*BigInt(units);
+  if(charge>BigInt(Number.MAX_SAFE_INTEGER))throw Error(`Tiền ${name} vượt giới hạn`);
+  input[name]=Number(charge);
+  charges[name]={basis,unitPrice,quantity:units,total:input[name]};
+ }
+ const total=calculateInvoice(input);
+ return {input,occupants,total,charges,difference:row.stated-total};
 }

@@ -54,9 +54,13 @@ export function parseCommand(text,defaultYear=new Date().getFullYear()) {
   return {type:'create_rooms',building,codes:numbers,rent:amount(s,'gia (?:phong|thue)|tien phong'),internet:amount(s,'internet'),cleaning:amount(s,'ve sinh'),parking:amount(s,'tien xe'),occupants:amount(s,'so nguoi')};
  }
  if(/\b(?:xuat|tai|luu)\b/.test(s)&&/\b(?:anh|png|hinh)\b/.test(s)&&/hoa don/.test(s))return {type:'invoice_images',building:room?roomMatch[1].toUpperCase():building,buildings,room,month:targetMonth};
+ if(/\b(?:xoa|huy)\b/.test(s)&&/hoa don/.test(s))return {type:'delete_invoice',building:room?roomMatch[1].toUpperCase():building,room,month:targetMonth};
+ if(/\bchua\b/.test(s)&&/\b(?:co|xuat|tao)\b/.test(s)&&/hoa don/.test(s))return {type:'missing_invoices',building,month:targetMonth};
  if(/\b(?:tim|tra|xem|liet ke|thong ke)\b/.test(s)&&/\b(?:cong no|chua thu|da thu)\b/.test(s))return {type:'debt_search',building,room,month:targetMonth};
+ if(/\b(?:no nhieu|no lon|no cao)\b/.test(s)&&building)return {type:'high_debt',building,month:targetMonth};
+ if(/\b(?:tong hop|thong ke|bao cao|tom tat)\b/.test(s)&&building)return {type:'summary',building,month:targetMonth};
  if(/\b(?:tim|tra|xem|liet ke|danh sach)\b/.test(s)&&/\b(?:phong|toa|nha)\b/.test(s)&&!/hoa don/.test(s))return {type:'entity_search',building,room};
- if(/hoa don/.test(s)&&!/(?:sua|doi)/.test(s))return {type:'invoice_lookup',building,room,month:targetMonth};
+ if(/hoa don/.test(s)&&!/(?:sua|doi|xoa|huy)/.test(s)&&!/\bchua\b/.test(s))return {type:'invoice_lookup',building,room,month:targetMonth};
  // Bulk entry: "Nhập điện mới nhà A1: 201=130, 202=140 tháng 10/2026".
  const batch=s.match(/\b(?:nhap|cap nhat)\s+(?:chi so\s+|so\s+)?(dien|nuoc)\s+moi\s+(?:nha\s+)?[av]\d{1,3}\s*:\s*((?:\d{2,5}\s*=\s*\d+\s*[,;]\s*)*\d{2,5}\s*=\s*\d+)/);
  if(batch)return {type:'meter_batch',building,field:batch[1]==='dien'?'currentElectric':'currentWater',month:targetMonth,readings:[...batch[2].matchAll(/(\d{2,5})\s*=\s*(\d+)/g)].map(m=>({room:m[1],value:Number(m[2])}))};
@@ -67,5 +71,35 @@ export function parseCommand(text,defaultYear=new Date().getFullYear()) {
  if(/(?:so nguoi|so cu dan|so nhan khau|dinh muc nhan khau)/.test(s)&&/(?:sua|doi|cap nhat|thay|dieu chinh)/.test(s))return {type:'occupants',building:roomMatch?.[1]?.toUpperCase(),room,value};
  if(/(?:nuoc moi|so nuoc moi)/.test(s)&&/(?:sua|doi|cap nhat|thay|la)/.test(s))return {type:'water_reading',building:roomMatch?.[1]?.toUpperCase(),room,value,month:targetMonth};
  if(/(?:dien moi|so dien moi|chi so dien moi)/.test(s)&&/(?:sua|doi|cap nhat|thay|la|len)/.test(s))return {type:'electric_reading',building:roomMatch?.[1]?.toUpperCase(),room,value,month:targetMonth};
+ // Toggle service: "Bật internet phòng A1.201", "Tắt sạc xe điện A1.301"
+ if(/\b(bat|tat)\b(?!\s+ca\b)/.test(s)){
+  const svcMap={'sac xe dien':'evCharging','sac xe':'evCharging','gui xe':'parking','tien xe':'parking','dich vu':'service','ve sinh':'service','phi dich vu':'service','internet':'internet','mang':'internet','dien':'electric','nuoc':'water'};
+  const on=/\bbat\b/.test(s);
+  for(const [key,svc] of Object.entries(svcMap)){
+   if(s.includes(key))return {type:'toggle_service',building:roomMatch?.[1]?.toUpperCase()||buildings[0],room:roomMatch?.[2],service:svc,enabled:on};
+  }
+ }
+ // Bulk service rate / rent update: "Cập nhật giá dịch vụ tất cả phòng nhà A1 lên 170.000"
+ if(/\b(?:tat ca|toan bo|moi)\s+phong\b/.test(s)&&/(?:sua|doi|cap nhat|thay|chinh|tang|ha)/.test(s)&&building){
+  const updates={};
+  let sr=amount(s,'gia (?:dich vu|ve sinh|dv)');if(sr===undefined&&/(?:gia (?:dich vu|ve sinh|dv)|dich vu)/.test(s)&&value!==null)sr=value;if(sr!==undefined)updates.serviceRate=sr;
+  let pr=amount(s,'gia (?:gui xe|tien xe)');if(pr===undefined&&/(?:gia (?:gui xe|tien xe)|tien xe)/.test(s)&&value!==null)pr=value;if(pr!==undefined)updates.parkingRate=pr;
+  let er=amount(s,'gia (?:sac(?: xe)?(?: dien)?)');if(er===undefined&&/(?:gia sac|sac xe)/.test(s)&&value!==null)er=value;if(er!==undefined)updates.evChargingRate=er;
+  let ir=amount(s,'gia (?:internet|mang)');if(ir===undefined&&/(?:gia (?:internet|mang)|internet|mang)/.test(s)&&value!==null)ir=value;if(ir!==undefined)updates.internetRate=ir;
+  let rt=amount(s,'(?:tien phong|gia phong|gia thue)');if(rt===undefined&&/(?:tien phong|gia phong|gia thue)/.test(s)&&value!==null)rt=value;if(rt!==undefined)updates.rent=rt;
+  if(Object.keys(updates).length)return {type:'bulk_service_update',building,updates};
+ }
+ // Single room config update: "Sửa giá dịch vụ A1.201 lên 170.000", "Sửa số xe A1.201 thành 2"
+ if(/(?:sua|doi|cap nhat|thay|chinh|dieu chinh)/.test(s)&&roomMatch&&/(?:gia dich vu|gia ve sinh|gia gui xe|gia tien xe|gia sac|gia internet|gia mang|so xe|tien phong|gia phong|gia thue)/.test(s)){
+  const updates={};
+  let sr=amount(s,'gia (?:dich vu|ve sinh|dv)');if(sr===undefined&&/(?:gia (?:dich vu|ve sinh|dv)|dich vu)/.test(s)&&value!==null)sr=value;if(sr!==undefined)updates.serviceRate=sr;
+  let pr=amount(s,'gia (?:gui xe|tien xe)');if(pr===undefined&&/(?:gia (?:gui xe|tien xe)|tien xe)/.test(s)&&value!==null)pr=value;if(pr!==undefined)updates.parkingRate=pr;
+  let er=amount(s,'gia (?:sac(?: xe)?(?: dien)?)');if(er===undefined&&/(?:gia sac|sac xe)/.test(s)&&value!==null)er=value;if(er!==undefined)updates.evChargingRate=er;
+  let ir=amount(s,'gia (?:internet|mang)');if(ir===undefined&&/(?:gia (?:internet|mang)|internet|mang)/.test(s)&&value!==null)ir=value;if(ir!==undefined)updates.internetRate=ir;
+  let rt=amount(s,'(?:tien phong|gia phong|gia thue)');if(rt===undefined&&/(?:tien phong|gia phong|gia thue)/.test(s)&&value!==null)rt=value;if(rt!==undefined)updates.rent=rt;
+  let evc=amount(s,'so xe dien');if(evc===undefined&&/so xe dien/.test(s)&&value!==null)evc=value;if(evc!==undefined)updates.evChargingCount=evc;
+  if(evc===undefined){let vc=amount(s,'so xe');if(vc===undefined&&/so xe\b/.test(s)&&!/so xe dien/.test(s)&&value!==null)vc=value;if(vc!==undefined)updates.parkingCount=vc;}
+  if(Object.keys(updates).length)return {type:'update_room_config',building:roomMatch[1].toUpperCase(),room:roomMatch[2],updates};
+ }
  return {type:'unsupported'};
 }

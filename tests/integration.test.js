@@ -33,14 +33,15 @@ async function start(){
  });
 }
 async function stop(){if(child&&!child.killed){child.kill();await new Promise(done=>{if(child.exitCode!==null)return done();child.once('exit',done);setTimeout(done,1500);});}}
-async function request(path,body,session,extraHeaders={}){
+async function request(path,body,session,extraHeaders={},method=null){
  const headers={'Content-Type':'application/json',...extraHeaders};
  if(session)headers.Cookie=session;
- const res=await fetch(`http://127.0.0.1:${port}/api/${path}`,{method:body===undefined?'GET':'POST',headers,...(body===undefined?{}:{body:JSON.stringify(body)})});
+ const m = method || (body===undefined?'GET':'POST');
+ const res=await fetch(`http://127.0.0.1:${port}/api/${path}`,{method:m,headers,...(body===undefined?{}:{body:JSON.stringify(body)})});
  const data=await res.json();return {status:res.status,data,cookie:res.headers.get('set-cookie')?.split(';')[0]};
 }
-async function ok(path,body,session){const res=await request(path,body,session);assert.equal(res.status,200,`${path}: ${JSON.stringify(res.data)}`);return res.data;}
-async function denied(path,body,session,status){const res=await request(path,body,session);assert.equal(res.status,status,`${path}: ${JSON.stringify(res.data)}`);return res.data;}
+async function ok(path,body,session,method=null){const res=await request(path,body,session,{},method);assert.equal(res.status,200,`${path}: ${JSON.stringify(res.data)}`);return res.data;}
+async function denied(path,body,session,status,method=null){const res=await request(path,body,session,{},method);assert.equal(res.status,status,`${path}: ${JSON.stringify(res.data)}`);return res.data;}
 
 test('real HTTP, isolated database, user permissions and financial lifecycle',async t=>{
  await start();
@@ -349,6 +350,19 @@ test('real HTTP, isolated database, user permissions and financial lifecycle',as
    assert.equal((await ok(`invoices/${inv.id}`,undefined,session)).input.currentElectric,15);
    const explicit=await ok('assistant/preview',{message:'Sửa điện mới A4.301 thành 16 tháng 10/2027',month:'2026-10'},session);
    assert.equal(explicit.items[0].month,'2027-10','year explicitly named by user has precedence');
+  });
+  await t.test('delete invoice endpoint removes invoice, versions, payments and writes audit log',async()=>{
+   const session=(await request('login',{email,password})).cookie;
+   await ok('periods',{buildingId:ids.A1,month:'2027-02'},session);
+   const inv=await ok('invoices',{roomId:ids.a1room,month:'2027-02',input:{previousElectric:0,currentElectric:10,previousWater:0,currentWater:0}},session);
+   assert.ok(inv.id);
+   const payment=await ok('payments',{invoiceId:inv.id,amount:100000,method:'CASH',reference:'TEST-DEL-PAYMENT'},session);
+   assert.ok(payment.id);
+   const delResult=await ok(`invoices/${inv.id}`,{reason:'Deleted during integration test'},session,'DELETE');
+   assert.equal(delResult.ok,true);
+   await denied(`invoices/${inv.id}`,undefined,session,404);
+   const logs=await ok('audit',undefined,session);
+   assert.ok(logs.some(l=>l.action==='DELETE'&&l.entity==='invoice'&&l.entity_id===inv.id));
   });
  }finally{await stop();rmSync(dataDir,{recursive:true,force:true});}
 });
